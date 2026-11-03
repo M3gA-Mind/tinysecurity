@@ -244,6 +244,18 @@ pub(crate) fn parse(record: &ApprovalRecord2, scope: &SubjectScope) -> Result<Ap
         || &row.binding.scope != scope
         || row.binding.binding_version != 1
         || row.binding.origin != row.binding.caller.origin
+        || row
+            .session_id
+            .as_ref()
+            .is_some_and(|session| Some(session) != row.binding.caller.thread.as_ref())
+        || row
+            .session_id
+            .as_ref()
+            .is_some_and(|session| session.is_empty() || session.len() > 1024)
+        || row
+            .audit_error
+            .as_ref()
+            .is_some_and(|error| error.chars().count() > 512)
         || !hex(&row.request_id, 32)
         || !hex(&row.host_instance, 32)
         || !hex(&row.nonce, 32)

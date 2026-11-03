@@ -2,9 +2,9 @@
 //!
 //! Password operations preserve the legacy Argon2id/AES-256-GCM payload.
 //! Keys stay native and are never included in diagnostic representations.
-//! Injected secret storage and bounded same-slot master resolution delegate
-//! historical `ChaCha` formats to the accepted storage driver; no OS capability
-//! or bus advertisement is added by this library checkpoint.
+//! Driver-backed keyring, native-handle and secret-store APIs are enabled by
+//! the default `native-storage` feature. The `device-pairing` feature exposes
+//! the wire crypto and pairing owner without pulling in a storage driver.
 //!
 //! ```
 //! use tinysecurity_crypto::password::PasswordKey;
@@ -18,11 +18,16 @@ pub mod device;
 pub mod device_handles;
 pub mod device_pairing;
 mod error;
+#[cfg(feature = "native-storage")]
 pub mod keyring;
+#[cfg(feature = "native-storage")]
 pub mod native_handles;
+#[cfg(feature = "native-storage")]
 pub mod native_store;
+#[cfg(feature = "native-storage")]
 pub mod pairing;
 pub mod password;
+#[cfg(feature = "native-storage")]
 pub mod secretstore;
 pub use error::{Error, Result};
 

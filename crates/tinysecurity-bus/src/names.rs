@@ -39,6 +39,12 @@ pub mod methods {
     pub const RECORD_EXECUTION2: &str = "RecordExecution2";
     /// Scoped sanitized durable rows.
     pub const LIST_APPROVALS2: &str = "ListApprovals2";
+    /// Bounded recent decisions across active approval scopes (contract 1.30).
+    pub const LIST_RECENT_DECISIONS2: &str = "ListRecentDecisions2";
+    /// Purge undecided rows for one session across active approval scopes (contract 1.30).
+    pub const PURGE_APPROVAL_SESSION2: &str = "PurgeApprovalSession2";
+    /// Persist redacted metadata after an audit sink failure (contract 1.30).
+    pub const RECORD_AUDIT_ERROR2: &str = "RecordAuditError2";
     /// Captured-scope cancellation phase.
     pub const CANCEL_APPROVAL2: &str = "CancelApproval2";
     /// Durable exact-boundary expiry phase.
@@ -69,12 +75,16 @@ pub mod methods {
     pub const RETIRE_APPROVAL_SCOPE2: &str = "RetireApprovalScope2";
     /// Register a secret resolver for an already-live approval scope (contract 1.29).
     pub const REGISTER_SECRET_SCOPE2: &str = "RegisterSecretScope2";
+    /// Register paired-device support for a canonical live approval scope.
+    pub const REGISTER_DEVICE_PAIRING_SCOPE2: &str = "RegisterDevicePairingScope2";
     /// Evaluate member.
     pub const EVALUATE: &str = "Evaluate";
     /// Check member.
     pub const CHECK: &str = "Check";
     /// `PolicyInfo` member.
     pub const POLICY_INFO: &str = "PolicyInfo";
+    /// Audit a typed native permission query before exposing its result.
+    pub const CHECK_PERMISSION_AUDITED2: &str = "CheckPermissionAudited2";
     /// Register an immutable filesystem policy scope.
     pub const REGISTER_PATH_POLICY: &str = "RegisterPathPolicy";
     /// Resolve and authorize an existing read path.
@@ -95,10 +105,14 @@ pub mod methods {
     pub const SPEND_ACTION2: &str = "SpendAction2";
     /// Read a registered command scope's hourly ledger without spending (contract 1.22).
     pub const PEEK_BUDGET2: &str = "PeekBudget2";
+    /// Reserve one action with an exact, committed audit receipt (contract 1.35).
+    pub const RESERVE_ACTION_BUDGET_AUDITED2: &str = "ReserveActionBudgetAudited2";
     /// Informational class of a host action by permission and external effect (contract 1.22).
     pub const CLASSIFY_HOST_ACTION2: &str = "ClassifyHostAction2";
     /// Descriptor-level privacy decision for a transfer with no pinned destination (contract 1.22).
     pub const PRIVACY_CHECK2: &str = "PrivacyCheck2";
+    /// Classify a configured provider host as same-machine or external (contract 1.32).
+    pub const CLASSIFY_PROVIDER_ENDPOINT2: &str = "ClassifyProviderEndpoint2";
     /// Register an immutable per-subject policy over path and command scopes.
     pub const REGISTER_POLICY: &str = "RegisterPolicy";
     /// Atomically replace an active policy, with human review when it widens.
@@ -115,6 +129,8 @@ pub mod methods {
     pub const CLASSIFY_COMMAND: &str = "ClassifyCommand";
     /// Noncacheable execution check and atomic action reservation.
     pub const CHECK_COMMAND: &str = "CheckCommand";
+    /// Command execution check whose decision is exposed only after its action reservation is audited (contract 1.35).
+    pub const CHECK_COMMAND_AUDITED2: &str = "CheckCommandAudited2";
     /// Register immutable host-only destination and data policy.
     pub const REGISTER_EGRESS_POLICY: &str = "RegisterEgressPolicy";
     /// Owner-bound pinned destination authorization.
@@ -203,6 +219,7 @@ pub const METHODS: &[&str] = &[
     methods::CHECK,
     methods::EVALUATE_AUDITED2,
     methods::CHECK_AUDITED2,
+    methods::CHECK_PERMISSION_AUDITED2,
     methods::REGISTER_PATH_POLICY,
     methods::VALIDATE_PATH,
     methods::VALIDATE_PARENT,
@@ -212,12 +229,15 @@ pub const METHODS: &[&str] = &[
     methods::PROTECTED_FLOOR2,
     methods::CREDENTIAL_ROOTS2,
     methods::SPEND_ACTION2,
+    methods::RESERVE_ACTION_BUDGET_AUDITED2,
     methods::PEEK_BUDGET2,
     methods::CLASSIFY_HOST_ACTION2,
     methods::PRIVACY_CHECK2,
+    methods::CLASSIFY_PROVIDER_ENDPOINT2,
     methods::REGISTER_COMMAND_POLICY,
     methods::CLASSIFY_COMMAND,
     methods::CHECK_COMMAND,
+    methods::CHECK_COMMAND_AUDITED2,
     methods::REGISTER_EGRESS_POLICY,
     methods::SCOPED_URL_GUARD,
     methods::SCOPED_EGRESS_CHECK,
@@ -239,6 +259,9 @@ pub const METHODS: &[&str] = &[
     methods::CONSUME_APPROVAL2,
     methods::RECORD_EXECUTION2,
     methods::LIST_APPROVALS2,
+    methods::LIST_RECENT_DECISIONS2,
+    methods::PURGE_APPROVAL_SESSION2,
+    methods::RECORD_AUDIT_ERROR2,
     methods::CANCEL_APPROVAL2,
     methods::EXPIRE_APPROVAL2,
     methods::PREAUTHORIZE_FLOW2,
@@ -252,6 +275,7 @@ pub const METHODS: &[&str] = &[
     methods::IMPORT_TRUST_SOURCE2,
     methods::REGISTER_APPROVAL_SCOPE2,
     methods::REGISTER_SECRET_SCOPE2,
+    methods::REGISTER_DEVICE_PAIRING_SCOPE2,
     methods::REPLACE_APPROVAL_SCOPE2,
     methods::RETIRE_APPROVAL_SCOPE2,
     methods::REGISTER_SANDBOX_SCOPE2,

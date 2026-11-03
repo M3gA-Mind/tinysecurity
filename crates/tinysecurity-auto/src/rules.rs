@@ -22,7 +22,7 @@ pub fn evaluate(scope: &ApprovalScope2, origin: &Origin, external: bool) -> Rule
     match origin {
         // The host's own pre-declared automation and a local operator never park.
         Origin::TrustedAutomation | Origin::LocalOperator => return Rule::Automatic,
-        Origin::Unlabelled => return Rule::GrantOnly,
+        Origin::Unlabelled | Origin::Unknown => return Rule::GrantOnly,
         _ => {}
     }
     if *origin != Origin::Saas

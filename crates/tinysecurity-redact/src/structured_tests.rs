@@ -23,6 +23,116 @@ fn markers_are_fixed_points_and_lookalikes_are_not() {
     assert!(!uuid("00000000000004000800000000000000123"));
     assert!(!uuid("gggggggg-0000-4000-8000-000000000123"));
 }
+
+#[test]
+fn structured_arguments_match_host_key_list_and_redact_nested_secret_patterns() -> Result<()> {
+    let registry = Redactor::new(&RedactorConfig::default())?;
+    let input = serde_json::json!({
+        "file-url": "https://storage.example/download?sig=private",
+        "X-Amz-Signature": "private-signature",
+        "command": "curl -H \"Authorization: Bearer private-curl-credential\" https://example.test"
+    });
+    let output = registry.redact(&tinysecurity_bus::RedactRequest {
+        text: input.to_string(),
+        mode: RedactMode::StructuredArguments,
+    })?;
+    let value: Value = serde_json::from_str(&output.text).map_err(|_| Error::InvalidArguments)?;
+    assert_eq!(value["file-url"], "<redacted: string (44 chars)>");
+    assert_eq!(value["X-Amz-Signature"], "<redacted: string (17 chars)>");
+    assert!(!output.text.contains("private-curl-credential"));
+    Ok(())
+}
+
+#[test]
+fn structured_content_keys_cover_the_host_approval_key_set() {
+    const HOST_KEYS: &[&str] = &[
+        "body",
+        "content",
+        "description",
+        "plaintext",
+        "text",
+        "message",
+        "messages",
+        "coverletter",
+        "note",
+        "reason",
+        "html",
+        "html_body",
+        "snippet",
+        "subject",
+        "title",
+        "recipient",
+        "recipients",
+        "to",
+        "cc",
+        "bcc",
+        "from",
+        "sender",
+        "address",
+        "email",
+        "phone",
+        "contact",
+        "contacts",
+        "name",
+        "first_name",
+        "last_name",
+        "full_name",
+        "displayname",
+        "bio",
+        "avatar",
+        "links",
+        "tags",
+        "channel_name",
+        "user",
+        "user_id",
+        "userid",
+        "username",
+        "thread_id",
+        "thread_ts",
+        "conversation_id",
+        "token",
+        "api_key",
+        "secret",
+        "password",
+        "authorization",
+        "auth",
+        "code",
+        "attachment",
+        "attachments",
+        "file_to_upload",
+        "file_url",
+        "public_url",
+        "signed_url",
+        "presigned_url",
+    ];
+    for key in HOST_KEYS {
+        assert!(sensitive_json_key(key), "missing host content key: {key}");
+    }
+    for key in [
+        "X-Amz-Signature",
+        "x-goog-credential",
+        "file-url",
+        "firstName",
+    ] {
+        assert!(content_key(key), "missing presigned/canonical key: {key}");
+    }
+}
+
+#[test]
+fn scan_tool_definition_requires_a_json_object() -> Result<()> {
+    let registry = Redactor::new(&RedactorConfig::default())?;
+    for definition in ["null", "[]", "\"schema\""] {
+        assert!(
+            registry
+                .scan_tool_definition(&ScanToolDefinitionRequest {
+                    name: "safe".into(),
+                    definition_json: definition.into(),
+                })
+                .is_err()
+        );
+    }
+    Ok(())
+}
 #[test]
 fn collision_keys_embedded_json_depth_and_browser_fixed_points() -> Result<()> {
     let registry = Redactor::new(&RedactorConfig {

@@ -50,6 +50,8 @@ pub enum Origin {
     /// evaluation denies it unless the registered scope holds a whole-tool grant for
     /// the tool, which approves it as an audited automatic approval.
     Unlabelled,
+    /// Origin classification failed or was unavailable; treated as untrusted.
+    Unknown,
 }
 /// Access ceiling verified by the host.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

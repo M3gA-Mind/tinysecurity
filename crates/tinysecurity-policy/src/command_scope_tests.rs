@@ -79,6 +79,132 @@ fn classify_reads_are_read() -> std::result::Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
+fn command_vocabulary_matches_host_policy_regressions()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let p = default_policy()?;
+    for (command, expected) in [
+        ("printf '%s\\n' hi", CommandClass::Read),
+        ("php -r 'echo 1;'", CommandClass::Write),
+        ("lua -e 'print(1)'", CommandClass::Write),
+        ("env FOO=1 curl https://example.test", CommandClass::Network),
+        ("timeout 5 ls", CommandClass::Read),
+        ("nohup env FOO=1 sudo reboot", CommandClass::Destructive),
+        ("nice -n 5 curl https://example.test", CommandClass::Network),
+        ("command curl https://example.test", CommandClass::Network),
+        ("exec curl https://example.test", CommandClass::Network),
+        ("time curl https://example.test", CommandClass::Network),
+        (
+            "stdbuf -oL curl https://example.test",
+            CommandClass::Network,
+        ),
+        ("xargs -I{} curl {}", CommandClass::Network),
+        ("c''url https://example.test", CommandClass::Network),
+        ("env -S 'curl https://example.test'", CommandClass::Network),
+        ("env -S'ls -la'", CommandClass::Write),
+        ("GIT_CONFIG_COUNT=1 git status", CommandClass::Write),
+        ("PATH=/tmp git status", CommandClass::Write),
+        ("GIT_PAGER=cat git status", CommandClass::Write),
+        ("git remote -v", CommandClass::Read),
+        (
+            "git remote add origin https://example.test",
+            CommandClass::Write,
+        ),
+        ("git remote remove origin", CommandClass::Write),
+        (
+            "git remote set-url origin https://example.test",
+            CommandClass::Write,
+        ),
+        ("git remote update", CommandClass::Write),
+        ("git reflog expire --all", CommandClass::Write),
+        ("git reflog delete HEAD@{1}", CommandClass::Write),
+        ("git --config-env=key=ENV status", CommandClass::Write),
+        ("git --config-env key=ENV status", CommandClass::Write),
+        ("git diff --output=/tmp/diff", CommandClass::Write),
+        ("git diff --output /tmp/diff", CommandClass::Write),
+        ("git log --output=/tmp/log", CommandClass::Write),
+        ("git log --output /tmp/log", CommandClass::Write),
+        ("git diff --ext-diff", CommandClass::Write),
+        ("npm audit", CommandClass::Read),
+        ("npm audit fix", CommandClass::Write),
+        ("pnpm audit fix", CommandClass::Write),
+        ("yarn audit fix", CommandClass::Write),
+        ("rg --pre cat pattern", CommandClass::Write),
+        ("tree -o /tmp/tree", CommandClass::Write),
+        ("hostname -F /tmp/hostname", CommandClass::Write),
+        ("hostname example.test", CommandClass::Write),
+        ("find . '-fprint' /tmp/list", CommandClass::Write),
+        // `&>` is a Bash output redirect; `${HOME}` is structurally denied.
+        ("printf hi &>out.txt", CommandClass::Write),
+        ("echo ${HOME}", CommandClass::Read),
+    ] {
+        assert_eq!(p.classify_command(command)?, expected, "{command}");
+    }
+    #[cfg(windows)]
+    let protected_file_url = "file:///C:/Users/test/.ssh/id_ed25519";
+    #[cfg(not(windows))]
+    let protected_file_url = "file:///home/test/.ssh/id_ed25519";
+    let file_url = p.0.classify(&CommandRequest {
+        policy_id: CommandPolicyId(String::new()),
+        command: format!("cat {protected_file_url}"),
+        declared_class: None,
+    })?;
+    assert_eq!(file_url.gate, CommandGate::Block);
+    assert_eq!(file_url.denial, Some(CommandDenial::Protected));
+    let dollar_expansion = p.0.evaluate(&CommandRequest {
+        policy_id: CommandPolicyId(String::new()),
+        command: "echo ${HOME}".into(),
+        declared_class: None,
+    })?;
+    assert_eq!(dollar_expansion.denial, Some(CommandDenial::Command));
+    let amp_redirect = p.0.evaluate(&CommandRequest {
+        policy_id: CommandPolicyId(String::new()),
+        command: "printf hi &>out.txt".into(),
+        declared_class: None,
+    })?;
+    assert_eq!(amp_redirect.class, CommandClass::Write);
+    assert_eq!(amp_redirect.denial, None);
+    Ok(())
+}
+
+#[test]
+fn matches_openhuman_command_class_corpus() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let p = default_policy()?;
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/openhuman_security_command_corpus.json"
+    ))?;
+    let rows = corpus.as_array().ok_or("corpus must be an array")?;
+    let mut checked = 0;
+    for row in rows {
+        if row.get("op").and_then(serde_json::Value::as_str) != Some("class") {
+            continue;
+        }
+        let command = row
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("class row needs command")?;
+        let expected = match row
+            .get("expect")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("class row needs expected class")?
+        {
+            "Read" => CommandClass::Read,
+            "Write" => CommandClass::Write,
+            "Network" => CommandClass::Network,
+            "Install" => CommandClass::Install,
+            "Destructive" => CommandClass::Destructive,
+            other => return Err(format!("unknown command class {other}").into()),
+        };
+        assert_eq!(p.classify_command(command)?, expected, "{command}");
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 13,
+        "update parity corpus count when host corpus changes"
+    );
+    Ok(())
+}
+
+#[test]
 fn classify_unknown_is_write_fail_closed() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let p = default_policy()?;
     // The whole point: a command we don't recognize is NOT treated as read.

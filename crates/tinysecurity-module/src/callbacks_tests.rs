@@ -92,7 +92,7 @@ async fn optional_storage_loss_cannot_authorize_a_scope_widening_attempt()
     let host = tinybus::Connection::connect(bus.connect().await?).await?;
     let module = tinybus::Connection::connect(bus.connect().await?).await?;
     let binding = PeerBinding::new(host.unique_name().as_ref().map(tinybus::BusName::as_str))?;
-    let client = AuditClient::new(
+    let client = AuditClient::new_for_test(
         module,
         binding,
         config(false),
@@ -150,13 +150,13 @@ async fn exact_sanitized_receipts_required_failure_and_optional_degradation_are_
     let module = tinybus::Connection::connect(bus.connect().await?).await?;
     let binding = PeerBinding::new(host.unique_name().as_ref().map(tinybus::BusName::as_str))?;
     let redactor = tinysecurity::Redactor::new(&RedactorConfig::default())?;
-    let required = AuditClient::new(
+    let required = AuditClient::new_for_test(
         module.clone(),
         binding.clone(),
         config(true),
         redactor.clone(),
     )?;
-    let optional = AuditClient::new(
+    let optional = AuditClient::new_for_test(
         module.clone(),
         binding.clone(),
         config(false),
@@ -238,7 +238,7 @@ async fn unrelated_success_receipt_never_confirms_a_required_batch()
         },
     )
     .await?;
-    let client = AuditClient::new(
+    let client = AuditClient::new_for_test(
         module,
         binding,
         config(true),
@@ -310,7 +310,7 @@ async fn audit_initialization_rejects_unbound_authority_and_mutable_configuratio
     binding.verify_reinit(None)?;
     binding.verify_reinit(host.unique_name().as_ref().map(tinybus::BusName::as_str))?;
     assert!(
-        AuditClient::new(
+        AuditClient::new_for_test(
             connection.clone(),
             PeerBinding::new(None)?,
             config(true),
@@ -328,7 +328,7 @@ async fn audit_initialization_rejects_unbound_authority_and_mutable_configuratio
         invalid.timeout_ms = timeout;
         invalid.stream_id = stream;
         assert!(
-            AuditClient::new(
+            AuditClient::new_for_test(
                 connection.clone(),
                 binding.clone(),
                 invalid,
@@ -337,7 +337,7 @@ async fn audit_initialization_rejects_unbound_authority_and_mutable_configuratio
             .is_err()
         );
     }
-    let client = AuditClient::new(connection, binding, config(true), registry)?;
+    let client = AuditClient::new_for_test(connection, binding, config(true), registry)?;
     client.verify_reinit(None)?;
     client.verify_reinit(Some(&config(true)))?;
     let mut replacement = config(true);
@@ -392,7 +392,7 @@ async fn native_storage_returns_exact_receipts_and_capacity_denies_without_phant
     native_config.timeout_ms = 30_000;
     native_config.journal_max_events = 1;
     let registry = tinysecurity::Redactor::new(&RedactorConfig::default())?;
-    let client = AuditClient::new(
+    let client = AuditClient::new_for_test(
         connection.clone(),
         binding.clone(),
         native_config.clone(),
@@ -419,7 +419,7 @@ async fn native_storage_returns_exact_receipts_and_capacity_denies_without_phant
     assert_eq!(denied.health, AuditHealth2::Denied);
     assert_eq!(std::fs::read(&path)?, stored);
     native_config.required = false;
-    let optional = AuditClient::new(
+    let optional = AuditClient::new_for_test(
         connection.clone(),
         binding.clone(),
         native_config.clone(),
@@ -429,7 +429,7 @@ async fn native_storage_returns_exact_receipts_and_capacity_denies_without_phant
     assert!(degraded.permitted && !degraded.committed);
     assert_eq!(degraded.health, AuditHealth2::Degraded);
     native_config.native_path = Some("relative-untrusted-private-path".into());
-    let error = AuditClient::new(connection, binding, native_config, registry)
+    let error = AuditClient::new_for_test(connection, binding, native_config, registry)
         .err()
         .ok_or("unsafe storage must fail initialization")?;
     assert!(!error.to_string().contains("private-path"));
@@ -465,7 +465,7 @@ async fn registry_replacement_sanitizes_subsequent_callback_without_changing_tru
     )
     .await?;
     let binding = PeerBinding::new(host.unique_name().as_ref().map(tinybus::BusName::as_str))?;
-    let client = AuditClient::new(
+    let client = AuditClient::new_for_test(
         module,
         binding,
         config(true),

@@ -95,6 +95,75 @@ fn authenticated_bootstrap_is_accepted_once_and_duplicate_is_denied() -> TestRes
 }
 
 #[test]
+fn runtime_scope_registration_is_idempotent_and_rejects_changed_authority() -> TestResult {
+    use tinysecurity_bus::Origin;
+
+    let registry = registry()?;
+    let scope_id = "c".repeat(32);
+    let canonical = ApprovalScope2 {
+        scope_id: scope_id.clone(),
+        subject: SubjectScope {
+            user: "runtime-user".into(),
+            workspace: "runtime-workspace".into(),
+            agent: "runtime-agent".into(),
+        },
+        policy_ref: "immutable".into(),
+        generation: 1,
+        ceiling: AccessTier::Full,
+        require_approval: true,
+        auto_approve_all: false,
+    };
+    registry.register_scope(canonical.clone(), Origin::Operator, 1, time(0))?;
+    registry.register_scope(canonical.clone(), Origin::Operator, 1, time(0))?;
+    assert!(key(&registry, 'c', DeviceKeyPurpose2::Static).is_ok());
+
+    let mut changed = canonical;
+    changed.subject.user = "different-user".into();
+    assert!(
+        registry
+            .register_scope(changed, Origin::Operator, 1, time(0))
+            .is_err()
+    );
+    assert!(
+        registry
+            .register_scope(registration(&scope_id), Origin::Operator, 2, time(0))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn empty_device_config_allows_only_later_host_registered_scopes() -> TestResult {
+    use tinysecurity_bus::DeviceConfig2;
+
+    let registry = Registry::new(
+        DeviceConfig2 {
+            scopes: Vec::new(),
+            max_handles: 16,
+            max_in_flight: 2,
+            operations_per_minute: 100,
+            frames_per_minute: 12_000,
+            max_ttl_ms: 100,
+            max_message_bytes: 1000,
+            max_bootstrap_nonces: 2,
+        },
+        &[],
+        ":1.1",
+        1,
+        time(0),
+    )?;
+    assert!(key(&registry, 'a', DeviceKeyPurpose2::Static).is_err());
+    Ok(())
+}
+
+#[test]
+fn runtime_scope_catalog_has_a_hard_bounded_capacity() {
+    assert!(ensure_scope_capacity(0).is_ok());
+    assert!(ensure_scope_capacity(MAX_DEVICE_SCOPES - 1).is_ok());
+    assert!(ensure_scope_capacity(MAX_DEVICE_SCOPES).is_err());
+}
+
+#[test]
 fn static_key_aliases_cannot_bypass_bootstrap_replay() -> TestResult {
     let reg = registry()?;
     let (first, public) = key(&reg, 'a', DeviceKeyPurpose2::Static)?;
@@ -962,13 +1031,15 @@ fn invalid_initialization_inputs_and_every_operation_shape_fail_closed() -> Test
     assert!(init(config(), &regs, "well.known", 1).is_err());
     assert!(init(config(), &regs, ":1.1", 0).is_err());
     assert!(init(config(), &[], ":1.1", 1).is_err());
+    let mut runtime_only = config();
+    runtime_only.scopes.clear();
+    assert!(init(runtime_only, &regs, ":1.1", 1).is_ok());
     let mut duplicate = config();
     duplicate.scopes.push(duplicate.scopes[0].clone());
     assert!(init(duplicate, &regs, ":1.1", 1).is_err());
-    for change in 0..9 {
+    for change in 1..9 {
         let mut cfg = config();
         match change {
-            0 => cfg.scopes.clear(),
             1 => cfg.max_handles = 0,
             2 => cfg.max_in_flight = 33,
             3 => cfg.operations_per_minute = 0,

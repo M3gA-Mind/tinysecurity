@@ -30,6 +30,40 @@ pub(crate) const MAX_OUTPUT: usize = 131_072;
 pub(crate) const MAX_DEPTH: usize = 32;
 pub(crate) const MARKER: &str = "[REDACTED]";
 pub use extended::ExtendedRedactors;
+/// A JSON value after content sanitation, paired with a content-free change tally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sanitized<T> {
+    /// The sanitized value.
+    pub value: T,
+    /// Summary of the edits made during sanitation.
+    pub report: SanitizationReport,
+}
+/// Counts of edits made by [`Redactor::sanitize_json`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SanitizationReport {
+    /// String nodes changed by text redaction.
+    pub text_redactions: usize,
+    /// Object entries dropped because their key is sensitive.
+    pub key_redactions: usize,
+    /// Whole private-key blocks found in string values.
+    pub blocked_secret_hits: usize,
+    /// Subtrees replaced at the JSON traversal depth limit.
+    pub depth_redactions: usize,
+    /// Validated personal-identifier matches in string values.
+    pub pii_redactions: usize,
+}
+impl SanitizationReport {
+    /// Whether sanitation changed at least one value or key.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.text_redactions
+            + self.key_redactions
+            + self.blocked_secret_hits
+            + self.depth_redactions
+            + self.pii_redactions
+            > 0
+    }
+}
 /// Immutable shared matching registry; Debug intentionally exposes no patterns or secrets.
 #[derive(Clone)]
 pub struct Redactor(Arc<Registry>);
@@ -98,6 +132,63 @@ impl Redactor {
             text,
         })
     }
+    /// Sanitize JSON content, dropping entries with credential or personal-data keys.
+    /// String values are passed through the same bounded pattern registry as [`Self::redact`].
+    ///
+    /// # Errors
+    /// Returns a content-free error if a string value exceeds the work/output bounds or
+    /// contains input that cannot be safely sanitized.
+    pub fn sanitize_json(&self, value: &serde_json::Value) -> Result<Sanitized<serde_json::Value>> {
+        let mut report = SanitizationReport::default();
+        let value = self.sanitize_json_node(value, 0, &mut report)?;
+        Ok(Sanitized { value, report })
+    }
+    fn sanitize_json_node(
+        &self,
+        value: &serde_json::Value,
+        depth: usize,
+        report: &mut SanitizationReport,
+    ) -> Result<serde_json::Value> {
+        if depth > MAX_DEPTH {
+            report.depth_redactions += 1;
+            return Ok(serde_json::Value::String(MARKER.into()));
+        }
+        match value {
+            serde_json::Value::Object(object) => {
+                let mut clean = serde_json::Map::new();
+                for (key, value) in object {
+                    if crate::structured::sensitive_json_key(key) {
+                        report.key_redactions += 1;
+                    } else {
+                        clean.insert(
+                            key.clone(),
+                            self.sanitize_json_node(value, depth + 1, report)?,
+                        );
+                    }
+                }
+                Ok(serde_json::Value::Object(clean))
+            }
+            serde_json::Value::Array(items) => items
+                .iter()
+                .map(|item| self.sanitize_json_node(item, depth + 1, report))
+                .collect::<Result<Vec<_>>>()
+                .map(serde_json::Value::Array),
+            serde_json::Value::String(text) => {
+                let clean = self.0.patterns.text(text)?;
+                if clean != *text {
+                    report.text_redactions += 1;
+                    if text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----") {
+                        report.blocked_secret_hits += 1;
+                    }
+                    if clean.contains(MARKER) && text.bytes().any(|b| b.is_ascii_digit()) {
+                        report.pii_redactions += 1;
+                    }
+                }
+                Ok(serde_json::Value::String(clean))
+            }
+            other => Ok(other.clone()),
+        }
+    }
     /// Scan original prompt intent before any redaction or lexical sanitation.
     /// Results provide context and never authorize execution.
     ///
@@ -116,7 +207,13 @@ impl Redactor {
         &self,
         request: &ScanPromptScoredRequest2,
     ) -> Result<ScanPromptScoredResponse2> {
-        bounded(&request.text)?;
+        if request.text.len() > MAX_INPUT {
+            return Ok(ScanPromptScoredResponse2 {
+                tier: tinysecurity_bus::PromptTier2::Review,
+                score_milli: 0,
+                rule_ids: vec!["input.oversized".into()],
+            });
+        }
         Ok(self.0.scorer.score(&request.text))
     }
     /// Scan a tool's name, keys, values and unknown metadata in the full JSON object.

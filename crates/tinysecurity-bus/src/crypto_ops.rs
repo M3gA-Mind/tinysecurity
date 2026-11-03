@@ -210,12 +210,26 @@ pub struct KeyringConsentRequest2 {
     pub timeout_ms: u32,
 }
 
+/// Outcome from the host's keyring consent decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyringConsentOutcome2 {
+    /// The human approved this exact operation.
+    Allowed,
+    /// The request is still waiting for a human decision.
+    ConsentPending,
+    /// The human refused this exact operation.
+    ConsentDenied,
+    /// The consent service could not make a decision.
+    Unavailable,
+}
+
 /// `KeyringConsent2.Consent` callback reply.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyringConsentResponse2 {
-    /// Verified human consent for exactly this request.
-    pub allowed: bool,
+    /// Explicit outcome for exactly this request.
+    pub outcome: KeyringConsentOutcome2,
 }
 
 /// Pairing operation on a registered account.

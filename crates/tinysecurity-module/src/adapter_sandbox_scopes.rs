@@ -55,12 +55,21 @@ impl SandboxRuntime {
         config.scope = subject.clone();
         config.stream_id = stream_id.into();
         config.native_path = None;
-        AuditClient::new(
+        #[cfg(test)]
+        let client = AuditClient::new_for_test(
             self.connection.clone(),
             self.binding.clone(),
             config,
             self.redactor.clone(),
-        )
+        );
+        #[cfg(not(test))]
+        let client = AuditClient::new(
+            self.connection.clone(),
+            self.binding.clone(),
+            config,
+            self.redactor.clone(),
+        );
+        client
     }
     fn holds_subject(clients: &BTreeMap<String, Arc<AuditClient>>, subject: &SubjectScope) -> bool {
         clients.values().any(|client| client.scope() == subject)

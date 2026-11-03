@@ -116,6 +116,79 @@ async fn authenticated_module_routes_persistent_decisions_reservation_history_an
     broker.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn recent_decisions_session_purge_and_audit_error_use_the_approval_engine()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bus = MemoryBus::new();
+    let broker = Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await?).await?;
+    let module = Connection::connect(bus.connect().await?).await?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("ledger");
+    std::fs::write(&path, [])?;
+    let store = Arc::new(Mutex::new(store::DiskStore::open(&path)?));
+    let clock = Arc::new(TestClock(AtomicU64::new(1000)));
+    let failure = Arc::new(AtomicBool::new(false));
+    serve_approvals(&host, &module, &clock, &store, &failure, None).await?;
+    let module_peer = module.unique_name().ok_or("module peer")?;
+    let proxy = host.proxy(module_peer.as_str(), names::OBJECT_PATH, names::INTERFACE)?;
+
+    let approved: EvaluateApprovalResponse2 = proxy
+        .call(names::methods::EVALUATE_APPROVAL2, (begin(1, 1),))
+        .await?;
+    let reserved: ApprovalRow2 = proxy
+        .call(
+            names::methods::CONSUME_APPROVAL2,
+            (action(&approved.record, 1, 3),),
+        )
+        .await?;
+    let terminal: ApprovalRow2 = proxy
+        .call(
+            names::methods::RECORD_EXECUTION2,
+            (RecordExecutionRequest2 {
+                action: action(&reserved, 1, 4),
+                outcome: ExecutionOutcome::Succeeded,
+            },),
+        )
+        .await?;
+    let saved_error: ApprovalRow2 = proxy
+        .call(
+            names::methods::RECORD_AUDIT_ERROR2,
+            (RecordAuditErrorRequest2 {
+                scope_id: "a".repeat(32),
+                request_id: terminal.request_id.clone(),
+                audit_error: "sink unavailable".into(),
+                audit: audit(5),
+            },),
+        )
+        .await?;
+    assert_eq!(saved_error.audit_error.as_deref(), Some("sink unavailable"));
+
+    let recent: Vec<ApprovalRow2> = proxy
+        .call(
+            names::methods::LIST_RECENT_DECISIONS2,
+            (RecentApprovalDecisionsRequest2 { limit: 10 },),
+        )
+        .await?;
+    assert!(
+        recent
+            .iter()
+            .any(|row| row.request_id == approved.record.request_id)
+    );
+
+    let removed: usize = proxy
+        .call(
+            names::methods::PURGE_APPROVAL_SESSION2,
+            (PurgeApprovalSessionRequest2 {
+                session_id: "thread".into(),
+            },),
+        )
+        .await?;
+    assert_eq!(removed, 0);
+    broker.abort();
+    Ok(())
+}
 #[tokio::test]
 async fn admission_questions_are_not_downgraded_by_configured_approvals()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -496,7 +569,7 @@ async fn serve_approvals_with(
     let redactor = tinysecurity::Redactor::new(&RedactorConfig {
         secrets: vec![Secret("fake-judge-key".into())],
     })?;
-    let clients = crate::approval_callbacks::ApprovalClients::new(
+    let clients = crate::approval_callbacks::ApprovalClients::new_for_test(
         module,
         Some(host_peer.as_str()),
         &config,

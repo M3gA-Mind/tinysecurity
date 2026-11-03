@@ -26,6 +26,10 @@ pub struct DevicePairingScope2 {
 pub struct DevicePairingConfig2 {
     /// Existing trusted device scopes, at most 128.
     pub scopes: Vec<DevicePairingScope2>,
+    /// Host-fixed defaults for runtime scopes. Runtime requests can select only
+    /// a live approval scope; they cannot choose persistence or legacy authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_scope: Option<DevicePairingRuntimeScope2>,
     /// Maximum enrolled devices per scope, in 1..=4096.
     pub max_pairings: u32,
     /// Maximum pending enrollments and renewals per scope, in 1..=128.
@@ -39,6 +43,40 @@ pub struct DevicePairingConfig2 {
     pub max_state_bytes: u32,
     /// Bounded context and persistence callback wait, in 1..=30000 milliseconds.
     pub callback_timeout_ms: u32,
+}
+
+/// Init-only authority defaults for runtime paired-device scopes.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevicePairingRuntimeScope2 {
+    /// Fixed host persistence backend shared by the module's scoped records.
+    pub persistence_backend_id: String,
+    /// Optional fixed source for one-time import of historical host identities.
+    pub legacy_device_backend_id: Option<String>,
+    /// Origins the host permits for dynamically registered device scopes.
+    pub allowed_origins: Vec<crate::Origin>,
+}
+
+/// Request to bind pairing to an already registered live approval scope.
+///
+/// `approval_scope_id` is only a lookup key: the module resolves the canonical
+/// live registration and derives the device and secret bindings itself. This
+/// request cannot supply a subject, master registration, backend, or origin.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterDevicePairingScopeRequest2 {
+    /// Existing approval scope to bind; never treated as a subject claim.
+    pub approval_scope_id: String,
+}
+
+/// Confirmation that one canonical approval scope is paired-device capable.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevicePairingScopeReceipt2 {
+    /// Canonical approval scope id registered by `TinySecurity`.
+    pub scope_id: String,
+    /// Whether the exact scope is active.
+    pub active: bool,
 }
 
 /// Exact paired-device action. Context claims are resolved through fixed host callbacks.
@@ -197,6 +235,10 @@ pub struct DevicePairingContextResponse2 {
     pub legacy_import_handle: Option<String>,
     /// Registered backend channel, empty for user-controller operations.
     pub channel_id: String,
+    /// Host-minted backend pairing token, present only for registered socket events.
+    /// It is bound to the pairing context and is never accepted from a module request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_token: Option<String>,
     /// Fresh connection nonce, empty for user-controller operations.
     pub connection_nonce: String,
     /// Current module generation captured by the trusted host.
@@ -334,6 +376,9 @@ macro_rules! redacted {
     )+};
 }
 redacted!(
+    DevicePairingRuntimeScope2,
+    RegisterDevicePairingScopeRequest2,
+    DevicePairingScopeReceipt2,
     DevicePairingScope2,
     DevicePairingConfig2,
     DevicePairingOperation2,

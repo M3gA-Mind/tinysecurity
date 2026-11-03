@@ -33,10 +33,17 @@ fn relative_directory_and_unbuilt_secret_service_fail_closed() {
         open("s", Backend::EncryptedFile("relative".into())).err(),
         Some(Error::InvalidInput)
     );
+    #[cfg(not(all(target_os = "linux", feature = "keyring-secret-service")))]
     assert_eq!(
         open("s", Backend::SecretService).err(),
         Some(Error::KeyringUnavailable)
     );
+}
+
+#[cfg(all(target_os = "linux", feature = "keyring-secret-service"))]
+#[test]
+fn explicit_secret_service_feature_constructs_backend() {
+    assert!(open("tinysecurity-test", Backend::SecretService).is_ok());
 }
 
 // Real platform credential store (macOS Keychain, Windows Credential Manager,

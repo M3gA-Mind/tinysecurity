@@ -29,7 +29,8 @@ env:
 jobs:
   prepare:
     name: Prepare release
-    if: ${{ github.ref == 'refs/heads/main' }}
+    # Published module releases come only from the canonical default branch.
+    if: ${{ github.repository == 'tinyhumansai/tinysecurity' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     outputs:
       crate_name: ${{ steps.version.outputs.crate_name }}
@@ -40,6 +41,9 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+
+      - name: Install Linux Secret Service build dependency
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -54,6 +58,9 @@ jobs:
       # The offline dependency feature test resolves the full locked platform graph.
       - name: Fetch the complete locked dependency graph
         run: cargo fetch --locked
+
+      - name: Test release asset verifier
+        run: python3 .github/scripts/verify_release_assets_tests.py
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -233,6 +240,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux Secret Service build dependency
+        if: ${{ runner.os == 'Linux' }}
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev
+
       # Key by distro: a Linux x64 cache written by one bundle (for example Fedora or
       # Arch) holds native build output linked against a newer glibc, which the
       # Ubuntu 22.04 bundle then fails to dlopen.
@@ -272,7 +283,14 @@ jobs:
           fi
 
       - name: Build installable module
-        run: cargo build --locked --release --lib --package ${{ env.RELEASE_PACKAGE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--locked --release --lib --package "${RELEASE_PACKAGE}")
+          if [[ "$RUNNER_OS" == 'Linux' ]]; then
+            args+=(--features tinysecurity-module/keyring-secret-service)
+          fi
+          cargo build "${args[@]}"
 
       - name: Verify Unix module through TinyBus loader
         if: ${{ runner.os != 'Windows' }}
@@ -460,11 +478,11 @@ jobs:
     steps:
       - name: Install Fedora build tools
         if: ${{ matrix.family == 'fedora' }}
-        run: dnf install -y gcc git gzip make perl tar
+        run: dnf install -y dbus-devel gcc git gzip make perl tar
 
       - name: Install Arch Linux build tools
         if: ${{ matrix.family == 'archlinux' }}
-        run: pacman -Syu --noconfirm base-devel git
+        run: pacman -Syu --noconfirm base-devel dbus git
 
       - uses: actions/checkout@v7
         with:
@@ -486,7 +504,7 @@ jobs:
           fi
 
       - name: Build installable module
-        run: cargo build --locked --release --lib --package ${{ env.RELEASE_PACKAGE }}
+        run: cargo build --locked --release --lib --package ${{ env.RELEASE_PACKAGE }} --features tinysecurity-module/keyring-secret-service
 
       - name: Verify module through TinyBus loader
         env:
@@ -586,6 +604,9 @@ jobs:
             --package tinybus --all-features --bin tinybus -- \
             modules checksum "${checksum_args[@]}" \
             --output release-assets/checksum.toml
+
+      - name: Verify all release archives and checksums
+        run: python3 .github/scripts/verify_release_assets.py release-assets
 
       - name: Create immutable release with module packages
         env:

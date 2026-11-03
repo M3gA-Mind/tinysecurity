@@ -59,6 +59,7 @@ struct Binding {
     scope: String,
     user: String,
     channel: String,
+    pairing_token: Option<String>,
     nonce: String,
     generation: u64,
 }
@@ -68,6 +69,7 @@ impl From<&DevicePairingContextResponse2> for Binding {
             scope: c.scope_id.clone(),
             user: c.user_binding.clone(),
             channel: c.channel_id.clone(),
+            pairing_token: c.pairing_token.clone(),
             nonce: c.connection_nonce.clone(),
             generation: c.generation,
         }
@@ -78,6 +80,7 @@ impl PartialEq for Binding {
         self.scope == other.scope
             && self.user == other.user
             && self.channel == other.channel
+            && self.pairing_token == other.pairing_token
             && self.nonce == other.nonce
             && self.generation == other.generation
     }
@@ -626,18 +629,18 @@ impl DevicePairingOwner {
         Ok(batch.imported)
     }
 
-    /// Merge the latest authenticated persistence snapshot without discarding live tunnels.
+    /// Merge the latest authenticated persistence snapshot during Recover without discarding live tunnels.
     /// This repairs the in-memory owner after a CAS committed but its response was lost.
     /// # Errors
     /// Rejects corrupt, foreign, conflicting or incompatible durable state.
-    pub fn merge_durable_state(
+    pub fn merge_recovered_durable_state(
         &mut self,
         plaintext: &[u8],
         context: &DevicePairingContextResponse2,
         now: Time,
     ) -> Result<()> {
         self.check_time(now)?;
-        let binding = self.user_controller_context(context, now)?;
+        let binding = self.recovery_user_controller_context(context, &context.channel_id, now)?;
         let durable = Self::restore(self.config.clone(), self.generation, now, plaintext)?;
         if durable.scope_identities != self.scope_identities {
             return Err(Error::DeviceDenied);
@@ -727,10 +730,7 @@ impl DevicePairingOwner {
         now: Time,
     ) -> Result<RecoveredDevicePairing> {
         self.check_time(now)?;
-        let binding = self.user_controller_context(context, now)?;
-        if !valid_channel(channel_id) || context.channel_id != channel_id {
-            return Err(Error::DeviceDenied);
-        }
+        let binding = self.recovery_user_controller_context(context, channel_id, now)?;
         let mut matches = self.records.values().filter(|record| {
             record.scope == binding.scope
                 && record.user == binding.user
@@ -877,9 +877,8 @@ impl DevicePairingOwner {
             .identities
             .get(&identity_id)
             .ok_or(Error::DeviceDenied)?;
-        let (_client_handshake_ephemeral, plaintext) = identity.key.open_handshake(frame)?;
-        let payload: HandshakePayload =
-            serde_json::from_slice(&plaintext).map_err(|_| Error::DeviceDenied)?;
+        let (client_handshake_ephemeral, plaintext) = identity.key.open_handshake(frame)?;
+        let payload = parse_handshake_payload(&plaintext, &client_handshake_ephemeral)?;
         let peer_static = PublicKey::decode(&payload.device_pubkey)?;
         let client_session_ephemeral = PublicKey::decode(&payload.client_ephemeral_pubkey)?;
         if pending
@@ -1308,6 +1307,11 @@ impl DevicePairingOwner {
                 && !valid_channel(&c.channel_id))
             || (source != DevicePairingSource2::AuthenticatedUserController
                 && c.connection_nonce.is_empty())
+            || (source == DevicePairingSource2::RegisteredSocket
+                && !c.pairing_token.as_deref().is_some_and(valid_pairing_token))
+            || c.pairing_token
+                .as_deref()
+                .is_some_and(|token| !valid_pairing_token(token))
             || c.expires_at_ms <= self.last.wall
             || !self.scope_identities.contains_key(&c.scope_id)
         {
@@ -1325,6 +1329,36 @@ impl DevicePairingOwner {
             || context.scope_id.is_empty()
             || context.user_binding.is_empty()
             || (!context.channel_id.is_empty() && !valid_channel(&context.channel_id))
+            || (!context.channel_id.is_empty()
+                && !context
+                    .pairing_token
+                    .as_deref()
+                    .is_some_and(valid_pairing_token))
+            || context
+                .pairing_token
+                .as_deref()
+                .is_some_and(|token| !valid_pairing_token(token))
+            || context.expires_at_ms <= now.wall
+            || !self.scope_identities.contains_key(&context.scope_id)
+        {
+            return Err(Error::DeviceDenied);
+        }
+        Ok(Binding::from(context))
+    }
+    fn recovery_user_controller_context(
+        &self,
+        context: &DevicePairingContextResponse2,
+        channel_id: &str,
+        now: Time,
+    ) -> Result<Binding> {
+        if context.source != DevicePairingSource2::AuthenticatedUserController
+            || context.generation != self.generation
+            || context.scope_id.is_empty()
+            || context.user_binding.is_empty()
+            || !valid_channel(channel_id)
+            || context.channel_id != channel_id
+            || context.pairing_token.is_some()
+            || !context.connection_nonce.is_empty()
             || context.expires_at_ms <= now.wall
             || !self.scope_identities.contains_key(&context.scope_id)
         {
@@ -1570,6 +1604,9 @@ fn valid_channel(channel: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
 }
+fn valid_pairing_token(token: &str) -> bool {
+    !token.is_empty() && token.len() <= 512 && token.bytes().all(|byte| byte.is_ascii_graphic())
+}
 fn validate_pending(p: &Pending, b: &Binding, now: Time) -> Result<()> {
     if p.binding != *b || now.wall >= p.expires_wall || now.monotonic >= p.expires_mono {
         Err(Error::DeviceDenied)
@@ -1627,6 +1664,22 @@ fn random_id() -> Result<String> {
 struct HandshakePayload {
     device_pubkey: String,
     client_ephemeral_pubkey: String,
+}
+
+fn parse_handshake_payload(bytes: &[u8], frame_ephemeral: &PublicKey) -> Result<HandshakePayload> {
+    if let Ok(payload) = serde_json::from_slice(bytes) {
+        return Ok(payload);
+    }
+    // Older clients send the device static key as the entire plaintext. The
+    // sealed frame already carries the client ephemeral key in this format.
+    let device_pubkey = std::str::from_utf8(bytes)
+        .map_err(|_| Error::DeviceDenied)?
+        .trim();
+    PublicKey::decode(device_pubkey)?;
+    Ok(HandshakePayload {
+        device_pubkey: device_pubkey.to_owned(),
+        client_ephemeral_pubkey: frame_ephemeral.encode(),
+    })
 }
 
 #[cfg(test)]

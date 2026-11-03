@@ -99,10 +99,19 @@ Unsupported member calls return the bus's unknown-member error.
 ## Packaging and smoke checks
 
 CI builds/tests on Linux, macOS and Windows, checks the host contract dependency
-tree and enforces per-file coverage. The release workflow retains eleven
-native platform keys and produces platform archives, modules.toml and
-checksum.toml. No artifact/digest is treated as production-published merely
-because a local library builds.
+tree and enforces per-file coverage. The release workflow builds eleven native
+platforms and five distro variants, then produces platform archives,
+modules.toml and checksum.toml. Its verifier requires all sixteen archives and
+checks every manifest digest against the hosted release files.
+
+The OpenHuman migration #8369 roll-up keeps the additive contract 1.x line.
+The proposed `abandoned` outcome in `tinyhumansai/tinysecurity#43` changes the
+wire contract to 2.0 and remains a separate change.
+
+Releases are dispatched only from canonical `tinyhumansai/tinysecurity` on
+`main`, after the module changes merge. Fork repositories and epic branches
+cannot enter the release job; the CI release-policy regression checks those
+repository/ref combinations.
 
 ```sh
 cargo run -p tinysecurity-module --example verify_module -- <native-library>
@@ -397,13 +406,17 @@ compact) so space-padded single-token triggers still score. Its false-positive t
 recalled-memory transcripts that merely mention "system prompt" or a "token push", the plural
 "tokens" of language-model text, and a colleague named Dan. A base64-like run and an
 invisible character are reported (`obfuscation.base64_run`, `obfuscation.invisible_character`) but
-carry no weight: they are common in benign content. The host's optional environment classifier is
-not part of the module. A tier is context and never authorizes execution. Input is bounded at
-64 KiB; larger input is refused, never truncated. Latency budget: about 20 us per KiB in release
+carry no weight: they are common in benign content. The optional
+`OPENHUMAN_PROMPT_INJECTION_CLASSIFIER=heuristic` host classifier is dropped;
+the deterministic owner scorer is the only classifier signal. A tier is context
+and never authorizes execution. Input is bounded at 64 KiB; larger `ScanPrompt2`
+input returns `review` with `input.oversized`, never a partial score. Latency budget: about 20 us per KiB in release
 (1 KiB 19 us, 4 KiB 65 us, 64 KiB 1.0 ms on the reference machine), so p99 under 5 ms for any
 accepted input.
 
-`ScanPrompt` and `ScanToolDefinition` keep their verdict wire. Their scanner now also reports a
+`ScanPrompt` and `ScanToolDefinition` keep their verdict wire. The latter accepts a
+serialized JSON object, which the MCP registry caller must build from the tool's
+complete definition; arrays, scalars and malformed JSON are refused. Their scanner now also reports a
 space-padded `jailbreak` as `override.obfuscated_role`, so a remote tool description with spaced-out
 trigger words no longer slips through.
 
@@ -491,3 +504,49 @@ calls with the same key do not recompile the rule set; an evicted registry is
 rebuilt on demand. The member is confidential: the literals are not logged or
 observable on the bus.
 
+
+
+## Audited native permission queries (contract 1.34)
+
+`CheckPermissionAudited2` takes `PermissionAuditRequest2`: the original typed
+`PermissionRequest2` and a stable `AuditCorrelation2`. It supports path and
+prospective-parent validation, individual and batched path checks, command gates,
+budget peeks, and descriptor privacy decisions. This closed vocabulary cannot
+invoke secret, approval, sandbox, execution, or action-reservation members.
+Command gates do not reserve an action; execution still needs its own reservation.
+
+The module computes the result from its registered scopes, derives and sanitizes
+the audit payload itself, and returns `PermissionAuditResponse2`. Its `decision`
+is present only when the matching event is committed and permitted under the
+current policy generation. Audit loss, stale generation, or an indeterminate
+receipt withholds the result. The separate audit evidence remains available for
+reconciliation. Legacy unaudited permissions continue to refuse calls when audit
+is required. Hosts serialize correlations against the configured stream and must
+check both `audit.permitted` and `audit.committed` before using a result.
+
+## Audited command execution and action-budget reservations (contract 1.35)
+
+`CheckCommandAudited2` evaluates a command under its currently registered
+command scope and returns the exact existing `CommandDecision` only after a
+durable audit receipt. An Allow carries a guarded action reservation: audit
+failure, cancellation, or a stale policy generation refunds it; a committed
+receipt commits the reservation. Exact retries return the same decision and
+receipt, while changed requests using the same event id are refused. Current
+scope ownership is checked before replay lookup. Read-only commands retain the
+command policy's existing Allow and accounting behavior; the separate
+`CheckPermissionAudited2::GateCommand` remains a non-reserving authorization
+query.
+
+`ReserveActionBudgetAudited2` takes a `BudgetRequest2` and stable
+`AuditCorrelation2`. It reserves only the registered command scope's hourly
+action accounting. It is not an execution permit: the host must independently
+complete tool, path, command, approval, and other authorization checks before
+dispatching any operation.
+
+The module returns the budget decision only with a committed audit receipt. The
+audit event id identifies this accounting operation; exact retries return the
+same committed result without reserving again, while reuse with changed request
+or correlation is refused. A failed or indeterminate audit drops the pending
+reservation. Replay records live no longer than the in-memory action ledger.
+Hosts must keep the correlation stable for a retry and serialize audit stream
+tails as required by the configured sink.

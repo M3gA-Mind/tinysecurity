@@ -175,17 +175,7 @@ impl MasterResolver {
     /// Mutation uncertainty remains unavailable until independently reconciled;
     /// constructing a new resolver does not establish backend quiescence.
     pub async fn resolve(&self) -> Result<MasterKey> {
-        if self
-            .reserved
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(Error::KeyringUnavailable);
-        }
-        let mut reservation = Reservation {
-            reserved: &self.reserved,
-            uncertain: false,
-        };
+        let mut reservation = self.reserve()?;
         if let Some(bytes) = self
             .target
             .get(&self.name)
@@ -236,6 +226,57 @@ impl MasterResolver {
         }
         reservation.uncertain = false;
         Ok(key)
+    }
+
+    /// Resolve only an already stored master without creating or changing entries.
+    ///
+    /// The target is checked first. If it is absent, all registered historical
+    /// sources are read and must agree. Confirmed absence returns `Ok(None)`;
+    /// denied, unavailable, malformed, or ambiguous state remains an error.
+    ///
+    /// # Errors
+    /// Returns a content-free error if any required read fails, any stored key
+    /// is malformed, legacy sources disagree, or another resolution is active.
+    pub async fn resolve_existing(&self) -> Result<Option<MasterKey>> {
+        let _reservation = self.reserve()?;
+        if let Some(bytes) = self
+            .target
+            .get(&self.name)
+            .await
+            .map_err(|error| project_error(&error))?
+        {
+            return parse(&bytes).map(Some);
+        }
+
+        let mut selected: Option<MasterKey> = None;
+        for source in &self.legacy {
+            if let Some(bytes) = source
+                .reader
+                .get(&source.slot.name())
+                .await
+                .map_err(|error| project_error(&error))?
+            {
+                let key = parse(&bytes)?;
+                if selected
+                    .as_ref()
+                    .is_some_and(|previous| previous.bytes() != key.bytes())
+                {
+                    return Err(Error::SecretInvalid);
+                }
+                selected.get_or_insert(key);
+            }
+        }
+        Ok(selected)
+    }
+
+    fn reserve(&self) -> Result<Reservation<'_>> {
+        self.reserved
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::KeyringUnavailable)?;
+        Ok(Reservation {
+            reserved: &self.reserved,
+            uncertain: false,
+        })
     }
 }
 struct Reservation<'a> {

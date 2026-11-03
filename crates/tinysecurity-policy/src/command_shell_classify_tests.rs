@@ -95,7 +95,15 @@ fn find_is_read_unless_it_executes_or_writes() {
 
 #[test]
 fn executors_classify_as_write() {
-    for base in ["python3", "bash", "node", "powershell", "xargs"] {
+    for base in [
+        "python3",
+        "bash",
+        "node",
+        "powershell",
+        "xargs",
+        "php",
+        "lua",
+    ] {
         assert_eq!(class(base, &["-c", "x"]), CommandClass::Write, "{base}");
     }
 }
@@ -113,6 +121,8 @@ fn command_executor_list() {
         "node.exe",
         "mshta",
         "xargs",
+        "php",
+        "lua",
     ] {
         assert!(is_command_executor(base), "{base}");
     }

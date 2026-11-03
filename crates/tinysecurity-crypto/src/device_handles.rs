@@ -64,6 +64,13 @@ struct State {
 /// Service-owned registry; dropping its last owner drops all private key material.
 #[derive(Clone)]
 pub struct Registry(Arc<Mutex<State>>);
+const MAX_DEVICE_SCOPES: usize = 65_536;
+fn ensure_scope_capacity(scope_count: usize) -> Result<()> {
+    if scope_count >= MAX_DEVICE_SCOPES {
+        return Err(Error::DeviceDenied);
+    }
+    Ok(())
+}
 
 /// Module-owned tunnel capability and its authenticated lifetime binding.
 pub struct PairedTunnelRegistration<'a> {
@@ -190,6 +197,64 @@ impl Registry {
             budget: WorkBudget::default(),
             limits: config.0.clone(),
         }))))
+    }
+
+    /// Register one runtime scope from its canonical live approval snapshot.
+    ///
+    /// The caller must obtain `registration` from the approval engine; this
+    /// method independently checks its generation and human-approval posture.
+    /// Repeating the exact registration is idempotent. Reusing an id for a
+    /// changed subject, policy, origin, or generation is denied.
+    ///
+    /// # Errors
+    /// Rejects invalid or stale approval scopes, changed duplicate ids, full
+    /// registries, unavailable clocks, and native key-generation failures.
+    pub fn register_scope(
+        &self,
+        registration: ApprovalScope2,
+        origin: tinysecurity_bus::Origin,
+        generation: u64,
+        now: Time,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        state.check_time(now)?;
+        let id = &registration.scope_id;
+        if generation != state.generation
+            || registration.generation != generation
+            || !registration.require_approval
+            || registration.auto_approve_all
+            || id.len() != 32
+            || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || [
+                &registration.subject.user,
+                &registration.subject.workspace,
+                &registration.subject.agent,
+            ]
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 256)
+        {
+            return Err(Error::DeviceDenied);
+        }
+        if let Some(existing) = state.scopes.get(id) {
+            return if existing.registration == registration && existing.origin == origin {
+                Ok(())
+            } else {
+                Err(Error::DeviceDenied)
+            };
+        }
+        ensure_scope_capacity(state.scopes.len())?;
+        let key = Arc::new(KeyPair::generate()?);
+        state.scopes.insert(
+            id.clone(),
+            Scope {
+                registration,
+                origin,
+                key,
+                epoch: 1,
+                rate: RateCounter::new(now.monotonic),
+            },
+        );
+        Ok(())
     }
     fn lock(&self) -> Result<MutexGuard<'_, State>> {
         self.0.lock().map_err(|_| Error::DeviceDenied)
@@ -1083,8 +1148,7 @@ impl State {
     }
 }
 fn validate_config(config: &DeviceConfig2) -> Result<()> {
-    if config.scopes.is_empty()
-        || config.scopes.len() > 128
+    if config.scopes.len() > 128
         || !(1..=4096).contains(&config.max_handles)
         || !(1..=32).contains(&config.max_in_flight)
         || !(1..=4096).contains(&config.operations_per_minute)

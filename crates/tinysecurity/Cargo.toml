@@ -27,6 +27,11 @@ tinysecurity-redact.workspace = true
 tinysecurity-policy = { workspace = true }
 tinysecurity-bus = { workspace = true }
 
+[features]
+default = []
+# Explicit Linux Secret Service support for hosts that need it.
+keyring-secret-service = ["tinysecurity-crypto/keyring-secret-service"]
+
 [dev-dependencies]
 serde_json = { workspace = true }
 

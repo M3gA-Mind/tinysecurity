@@ -35,6 +35,15 @@ use tinysecurity_bus::{
     SecretRequest2, SecretResponse2, SubjectScope, callback_names2, names,
 };
 use zeroize::Zeroizing;
+
+fn legacy_import_handle(host_event_id: &str) -> String {
+    match host_event_id {
+        "legacy-import-foreign-source" => "fixture-legacy-foreign-source".into(),
+        "legacy-import-corrupt" => "fixture-legacy-corrupt".into(),
+        event_id => format!("fixture-legacy-import-handle-{event_id}"),
+    }
+}
+
 fn denied() -> tinybus::Error {
     tinybus::Error::failed("native fixture denied")
 }
@@ -446,14 +455,7 @@ impl Callback {
                 _ => return Err(denied()),
             };
         let legacy_import_handle = if request.purpose == DevicePairingPurpose2::LegacyImport {
-            Some(
-                match request.host_event_id.as_str() {
-                    "legacy-import-foreign-source" => "fixture-legacy-foreign-source",
-                    "legacy-import-corrupt" => "fixture-legacy-corrupt",
-                    _ => "fixture-legacy-import-handle",
-                }
-                .to_string(),
-            )
+            Some(legacy_import_handle(&request.host_event_id))
         } else {
             None
         };
@@ -462,6 +464,20 @@ impl Callback {
             .as_deref()
             .is_some_and(|requested| requested != channel)
         {
+            return Err(denied());
+        }
+        let tokenless_recovery = matches!(
+            request.host_event_id.as_str(),
+            "recover-legacy-a" | "recover-legacy-b" | "recover-lost-confirm"
+        );
+        if tokenless_recovery
+            && (request.requested_channel_id.as_deref() != Some(channel) || !nonce.is_empty())
+        {
+            return Err(denied());
+        }
+        let pairing_token =
+            (!channel.is_empty() && !tokenless_recovery).then(|| "fixture-pairing-token".into());
+        if tokenless_recovery && pairing_token.is_some() {
             return Err(denied());
         }
         let expires_at_ms = if matches!(
@@ -483,6 +499,7 @@ impl Callback {
             secret_master_handle: alias,
             legacy_import_handle,
             channel_id: channel.into(),
+            pairing_token,
             connection_nonce: nonce.into(),
             generation: self.state.generation.load(Ordering::Acquire),
             source,
@@ -493,12 +510,10 @@ impl Callback {
 
     fn load_legacy_pairings(&self, args: serde_json::Value) -> tinybus::Result<serde_json::Value> {
         let (request,): (DevicePairingLegacyLoadRequest2,) = serde_json::from_value(args)?;
-        if !matches!(
-            request.handle.as_str(),
-            "fixture-legacy-import-handle"
-                | "fixture-legacy-foreign-source"
-                | "fixture-legacy-corrupt"
-        ) {
+        if request.handle != "fixture-legacy-foreign-source"
+            && request.handle != "fixture-legacy-corrupt"
+            && !request.handle.starts_with("fixture-legacy-import-handle-")
+        {
             return Err(denied());
         }
         let mut records = self
@@ -792,6 +807,7 @@ fn configuration(
                 legacy_device_backend_id: Some("e".repeat(32)),
                 legacy_source_registration_id: Some("b".repeat(32)),
             }],
+            runtime_scope: None,
             max_pairings: 32,
             max_pending: 8,
             max_pending_ttl_ms: 300_000,
@@ -1036,7 +1052,8 @@ async fn device_pairing_roundtrip(
                 },
             ),),
         )
-        .await?;
+        .await
+        .map_err(|error| format!("logout lock during unlock race failed: {error}"))?;
     state.pairing_release_load.notify_one();
     assert!(
         racing_unlock.await?.is_err(),
@@ -1053,7 +1070,8 @@ async fn device_pairing_roundtrip(
                 },
             ),),
         )
-        .await?;
+        .await
+        .map_err(|error| format!("unlock after logout race failed: {error}"))?;
     let initial_public = unlock.core_public_key.ok_or("pairing public identity")?;
     let legacy_secrets = [[0x31; 32], [0x32; 32]];
     let legacy_devices = [KeyPair::generate()?, KeyPair::generate()?];
@@ -1181,7 +1199,8 @@ async fn device_pairing_roundtrip(
                     },
                 ),),
             )
-            .await?;
+            .await
+            .map_err(|error| format!("legacy channel Recover {index} failed: {error}"))?;
         let expected = KeyPair::from_secret(Zeroizing::new(*secret))?
             .public_key()
             .encode();
@@ -1336,7 +1355,8 @@ async fn device_pairing_roundtrip(
                 },
             ),),
         )
-        .await?;
+        .await
+        .map_err(|error| format!("reloaded legacy Recover failed: {error}"))?;
     let expected_legacy = KeyPair::from_secret(Zeroizing::new(legacy_secrets[1]))?
         .public_key()
         .encode();
@@ -1879,7 +1899,8 @@ async fn device_pairing_roundtrip(
                 },
             ),),
         )
-        .await?;
+        .await
+        .map_err(|error| format!("lost-confirm Recover failed: {error}"))?;
     assert!(orphan.pairing_id.is_some());
     assert!(orphan.device_public_key.is_some());
     let _: DevicePairingResponse2 = proxy
@@ -2057,6 +2078,10 @@ async fn exercise_migration(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "fixture_tests.rs"]
+mod tests;
 async fn reject_wrong_peer(bus: &MemoryBus, module: &BusName, handle: &str) -> tinybus::Result<()> {
     let attacker = Connection::connect(bus.connect().await?).await?;
     assert!(
@@ -2222,7 +2247,8 @@ pub(super) async fn run(
         task.abort();
         return Ok(());
     }
-    let loaded = loaded?;
+    let loaded =
+        loaded.map_err(|error| format!("native module load failed in mode {mode}: {error}"))?;
     let module = host
         .name_owner(loaded.manifest.bus_name.as_str())
         .await?
@@ -2236,7 +2262,10 @@ pub(super) async fn run(
         .with_timeout(Duration::from_secs(35));
     assert!(proxy.attestation().await?.is_some());
     if mode == 18 {
-        let _: PolicyInfo = proxy.call(names::methods::POLICY_INFO, ()).await?;
+        let _: PolicyInfo = proxy
+            .call(names::methods::POLICY_INFO, ())
+            .await
+            .map_err(|error| format!("device pairing module readiness failed: {error}"))?;
     }
     let mut audit_sequence = 1;
     let resolved = acquire_master(&proxy, &state, 1, "native-master", &mut audit_sequence).await;
@@ -2245,7 +2274,8 @@ pub(super) async fn run(
         task.abort();
         return Ok(());
     }
-    let SecretResponse2::MasterHandle { handle, .. } = resolved?;
+    let SecretResponse2::MasterHandle { handle, .. } = resolved
+        .map_err(|error| format!("native master acquisition failed in mode {mode}: {error}"))?;
     *state.master_alias.lock().map_err(|_| denied())? = Some(handle.clone());
     assert_eq!(*state.prompts.lock().map_err(|_| denied())?, 1);
     if matches!(mode, 14 | 17) {
@@ -2271,7 +2301,8 @@ pub(super) async fn run(
     }
     if mode == 18 {
         device_pairing_roundtrip(&lifecycle, &loaded.name, &config, &proxy, &state, &handle)
-            .await?;
+            .await
+            .map_err(|error| format!("native device pairing roundtrip failed: {error}"))?;
         lifecycle.shutdown(Duration::from_secs(5)).await;
         task.abort();
         println!(

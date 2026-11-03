@@ -203,9 +203,229 @@ async fn unlabelled_origin_is_denied_without_a_whole_tool_grant_and_leaves_nothi
 }
 
 #[tokio::test]
+async fn unknown_origin_denies_without_a_whole_tool_grant() -> Result<()> {
+    let (fixture, owner) = owner()?;
+    owner.register_scope(register(7)).await?;
+    let mut request = shell(7, None, Origin::Unknown, "unknown-origin");
+    request.audit = at(1);
+    assert_eq!(owner.begin(request).await.err(), Some(Error::Denied));
+    assert_eq!(prompts(&fixture)?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn recent_decisions_include_all_registered_scopes_and_skip_pending_rows() -> Result<()> {
+    let (_, owner) = owner()?;
+    owner.register_scope(register(7)).await?;
+    owner.register_scope(register(8)).await?;
+    let mut first = shell(7, None, Origin::TrustedAutomation, "decision-1");
+    first.audit = at(1);
+    let first_row = owner.begin(first).await?;
+    let mut pending = shell(7, None, Origin::Operator, "pending");
+    pending.audit = at(2);
+    let pending_row = owner.begin(pending).await?;
+    let mut second = shell(8, None, Origin::TrustedAutomation, "decision-2");
+    second.audit = at(3);
+    let second_row = owner.begin(second).await?;
+
+    let rows = owner.list_recent_decisions(10).await?;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.state == ApprovalLifecycle2::Approved)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.request_id == first_row.request_id)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.request_id == second_row.request_id)
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.request_id == pending_row.request_id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_purge_matches_one_redacted_id_across_scopes_and_keeps_decisions() -> Result<()> {
+    let (_, owner) = owner()?;
+    owner.register_scope(register(7)).await?;
+    owner.register_scope(register(8)).await?;
+    let mut pending_a = shell(7, None, Origin::Operator, "pending-a");
+    pending_a.request.caller.thread = Some("session-A".into());
+    pending_a.audit = at(1);
+    let pending_a = owner.begin(pending_a).await?;
+    let mut pending_b = shell(8, None, Origin::Operator, "pending-b");
+    pending_b.request.caller.thread = Some("session-A".into());
+    pending_b.audit = at(2);
+    owner.begin(pending_b).await?;
+    let mut other_session = shell(7, None, Origin::Operator, "other-session");
+    other_session.request.caller.thread = Some("session-B".into());
+    other_session.audit = at(3);
+    let other_session = owner.begin(other_session).await?;
+    let mut decided = shell(8, None, Origin::TrustedAutomation, "decided");
+    decided.request.caller.thread = Some("session-A".into());
+    decided.audit = at(4);
+    let decided = owner.begin(decided).await?;
+
+    assert_eq!(owner.purge_session("session-A").await?, 2);
+    assert_eq!(owner.purge_session("").await.err(), Some(Error::Invalid));
+    let first_scope = owner.list(&id(7)).await?;
+    let second_scope = owner.list(&id(8)).await?;
+    assert!(
+        !first_scope
+            .iter()
+            .any(|row| row.request_id == pending_a.request_id)
+    );
+    assert!(
+        first_scope
+            .iter()
+            .any(|row| row.request_id == other_session.request_id)
+    );
+    assert!(
+        second_scope
+            .iter()
+            .any(|row| row.request_id == decided.request_id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_error_is_redacted_before_persistence_and_capped_after_redaction() -> Result<()> {
+    let fixture = Arc::new(Fixture::default());
+    let redactor_secret = "private-audit-secret";
+    let mut redactor_config = RedactorConfig::default();
+    redactor_config.secrets.push(Secret(redactor_secret.into()));
+    let owner = Engine::new(
+        config(),
+        fixture.clone(),
+        Arc::new(TestClock::default()),
+        Redactor::new(&redactor_config).map_err(|_| Error::Invalid)?,
+    )?;
+    owner.register_scope(register(7)).await?;
+    let mut request = shell(7, None, Origin::Operator, "audit-error");
+    request.audit = at(1);
+    let row = owner.begin(request).await?;
+    let raw = format!("sink rejected {redactor_secret} {}", "x".repeat(700));
+
+    let recorded = owner
+        .record_audit_error(tinysecurity_bus::RecordAuditErrorRequest2 {
+            scope_id: id(7),
+            request_id: row.request_id.clone(),
+            audit_error: raw.clone(),
+            audit: at(2),
+        })
+        .await?;
+
+    let value = recorded.audit_error.as_deref().ok_or(Error::Invalid)?;
+    assert!(value.chars().count() <= 512);
+    assert!(!value.contains(redactor_secret));
+    assert!(!value.contains(&"x".repeat(700)));
+    assert_eq!(recorded.state, ApprovalLifecycle2::Pending);
+    assert!(
+        fixture
+            .rows
+            .lock()
+            .map_err(|_| Error::Unavailable)?
+            .contains_key(&row.request_id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_error_short_value_is_idempotent_and_conflicting_updates_are_rejected() -> Result<()>
+{
+    let (_, owner) = owner()?;
+    owner.register_scope(register(7)).await?;
+    let mut request = shell(7, None, Origin::Operator, "audit-error-short");
+    request.audit = at(1);
+    let row = owner.begin(request).await?;
+    let input = tinysecurity_bus::RecordAuditErrorRequest2 {
+        scope_id: id(7),
+        request_id: row.request_id.clone(),
+        audit_error: "sink unavailable".into(),
+        audit: at(2),
+    };
+    let recorded = owner.record_audit_error(input.clone()).await?;
+    assert_eq!(recorded.audit_error.as_deref(), Some("sink unavailable"));
+    assert_eq!(owner.record_audit_error(input).await?, recorded);
+    assert_eq!(
+        owner
+            .record_audit_error(tinysecurity_bus::RecordAuditErrorRequest2 {
+                scope_id: id(7),
+                request_id: row.request_id,
+                audit_error: "different failure".into(),
+                audit: at(3),
+            })
+            .await
+            .err(),
+        Some(Error::Conflict)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_error_rejects_empty_diagnostic_before_loading_a_row() -> Result<()> {
+    let (_, owner) = owner()?;
+    let result = owner
+        .record_audit_error(tinysecurity_bus::RecordAuditErrorRequest2 {
+            scope_id: id(7),
+            request_id: "missing".into(),
+            audit_error: String::new(),
+            audit: at(1),
+        })
+        .await;
+    assert_eq!(result.err(), Some(Error::Invalid));
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_session_purge_port_fails_closed() -> Result<()> {
+    #[derive(Debug)]
+    struct DefaultPurgePort;
+    #[async_trait::async_trait]
+    impl Ports for DefaultPurgePort {
+        async fn load(&self, _: ApprovalLoadRequest2) -> Result<ApprovalLoadResponse2> {
+            Err(Error::Unavailable)
+        }
+        async fn cas(&self, _: ApprovalCasRequest2) -> Result<ApprovalCasResponse2> {
+            Err(Error::Unavailable)
+        }
+        async fn prompt(&self, _: ApprovalDeliveryRequest2) -> Result<ApprovalDeliveryResponse2> {
+            Err(Error::Unavailable)
+        }
+        async fn human(&self, _: VerifyHumanRequest2) -> Result<HumanDecisionReceipt2> {
+            Err(Error::Unavailable)
+        }
+        async fn audit(&self, _: ApprovalRow2) -> Result<()> {
+            Err(Error::Unavailable)
+        }
+    }
+    let result = Ports::purge_session(
+        &DefaultPurgePort,
+        tinysecurity_bus::ApprovalPurgeSessionRequest2 {
+            scope: tinysecurity_bus::SubjectScope {
+                user: "user".into(),
+                workspace: "workspace".into(),
+                agent: "agent".into(),
+            },
+            session_id: "redacted-session".into(),
+        },
+    )
+    .await;
+    assert_eq!(result.err(), Some(Error::Denied));
+    Ok(())
+}
+
+#[tokio::test]
 async fn unlabelled_origin_is_approved_only_by_the_exact_whole_tool_grant() -> Result<()> {
     let (fixture, owner) = owner()?;
     let mut req = register(7);
+    req.scope.require_approval = false;
     req.grants = grants(&["shell"], &[]);
     owner.register_scope(req).await?;
     let row = owner
@@ -910,6 +1130,23 @@ async fn whole_tool_trust_keeps_cron_unlabelled_and_human_only_boundaries() -> R
 }
 
 #[tokio::test]
+async fn require_approval_overrides_whole_tool_allowlist() -> Result<()> {
+    let (_, owner) = owner()?;
+    let mut scope = register(7);
+    scope.scope.require_approval = true;
+    scope.grants = grants(&["shell"], &[]);
+    owner.register_scope(scope).await?;
+
+    let mut request = shell(7, None, Origin::Operator, "required-call");
+    request.audit = at(2);
+    let row = owner.begin(request).await?;
+
+    assert_eq!(row.state, ApprovalLifecycle2::Pending);
+    assert_eq!(row.attribution, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn whole_tool_grant_fails_closed_when_the_store_cannot_persist() -> Result<()> {
     let (fixture, owner) = owner()?;
     owner.register_scope(register(7)).await?;
@@ -1258,6 +1495,7 @@ async fn source_import_validation_and_store_errors_fail_closed() -> Result<()> {
 async fn an_unlabelled_approval_dies_when_only_a_flow_grant_remains() -> Result<()> {
     let (_, owner) = owner()?;
     let mut req = register(7);
+    req.scope.require_approval = false;
     req.grants = grants(&["shell"], &[]);
     owner.register_scope(req.clone()).await?;
     let call = shell(7, Some("flow-1"), Origin::Unlabelled, "call-1");

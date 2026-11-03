@@ -93,6 +93,7 @@ pub(super) fn request(scope: &SandboxScope2, sequence: u64) -> SandboxPlanReques
         limits: ResourceLimits2::default(),
         deny_subprocesses: false,
         accept_process_isolation: false,
+        credential_denials: vec![],
         options: tinysecurity_bus::SandboxPlanOptions2::default(),
         generation: 1,
         ttl_ms: 30_000,

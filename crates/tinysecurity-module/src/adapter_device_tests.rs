@@ -499,7 +499,7 @@ async fn harness() -> std::result::Result<Harness, Box<dyn std::error::Error>> {
         1,
         time(clock.as_ref())?,
     )?);
-    let clients = crate::approval_callbacks::ApprovalClients::new(
+    let clients = crate::approval_callbacks::ApprovalClients::new_for_test(
         &module,
         Some(peer.as_str()),
         &config,

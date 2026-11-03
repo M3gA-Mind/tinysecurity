@@ -1,14 +1,12 @@
 //! Synthetic sender-bound callback fixture shared by unit and native acceptance.
-#[path = "../approval_native_contract/callback.rs"]
-pub(crate) mod callback;
 #[path = "../approval_native_contract/store.rs"]
 pub(crate) mod store;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{Arc, Mutex};
 use tinysecurity_bus::{
     AccessTier, ApprovalChoice2, ApprovalLifecycle2, ApprovalRow2, ApprovalScope2, AuditConfig2,
     AuditCorrelation2, DecideRequest2, DeviceConfig2, DeviceOperation2, DeviceRequest2,
     DeviceResponse2, DeviceScope2, EvaluateDeviceRequest2, ExecuteDeviceRequest2, Origin,
-    SubjectScope, callback_names2, names,
+    SubjectScope, names,
 };
 pub(crate) fn audit(sequence: u64) -> AuditCorrelation2 {
     AuditCorrelation2 {
@@ -91,37 +89,8 @@ pub(crate) fn request(instance: u64, operation: DeviceOperation2) -> DeviceReque
         operation,
     }
 }
-pub(crate) async fn serve_callbacks(
-    host: &tinybus::Connection,
-    module: &tinybus::BusName,
-    store: &Arc<Mutex<store::DiskStore>>,
-    reentrant: bool,
-) -> tinybus::Result<()> {
-    let reentrant = Arc::new(AtomicBool::new(reentrant));
-    let scope = tinysecurity::approval::scope_handle(&registration().subject)
-        .map_err(|_| tinybus::Error::failed("fixture scope"))?;
-    for interface in [
-        callback_names2::APPROVAL_STORE,
-        callback_names2::APPROVAL_PROMPT,
-    ] {
-        host.serve_at(
-            callback_names2::OBJECT_PATH.parse()?,
-            callback::Callback {
-                module: module.clone(),
-                host: host.clone(),
-                interface: interface.parse()?,
-                scope: scope.clone(),
-                store: store.clone(),
-                reentrant: reentrant.clone(),
-                prompt_failure: Arc::new(AtomicBool::new(false)),
-            },
-        )
-        .await?;
-    }
-    Ok(())
-}
 pub(crate) async fn run_at(
-    proxy: &tinybus::Proxy,
+    proxy: &tinybus::module::HostCallbackProxy,
     store: &Arc<Mutex<store::DiskStore>>,
     sequence: &mut u64,
     operation: DeviceOperation2,
@@ -184,7 +153,7 @@ pub(crate) async fn run_at(
 }
 
 pub(crate) async fn run(
-    proxy: &tinybus::Proxy,
+    proxy: &tinybus::module::HostCallbackProxy,
     store: &Arc<Mutex<store::DiskStore>>,
     sequence: &mut u64,
     operation: DeviceOperation2,

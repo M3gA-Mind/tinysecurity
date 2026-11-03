@@ -38,3 +38,15 @@ fn human_ticket_wire_is_strict_and_debug_never_discloses_opaque_authority()
     assert_eq!(format!("{request:?}"), "DecideRequest2([REDACTED])");
     Ok(())
 }
+
+#[test]
+fn purge_session_debug_redacts_the_raw_session_identity() {
+    let request = PurgeApprovalSessionRequest2 {
+        session_id: "private-session-id".into(),
+    };
+
+    assert_eq!(
+        format!("{request:?}"),
+        "PurgeApprovalSessionRequest2([REDACTED])"
+    );
+}

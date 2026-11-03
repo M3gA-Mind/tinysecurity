@@ -324,6 +324,7 @@ pub(super) async fn verify(library: &Path) -> std::result::Result<(), Box<dyn st
     };
     let proxy = client.proxy(module.as_str(), names::OBJECT_PATH, names::INTERFACE)?;
     assert!(proxy.attestation().await?.is_some());
+    verify_stale_native_permission(&proxy).await?;
     let first: CheckAuditedResponse2 = proxy
         .call_confidential(names::methods::CHECK_AUDITED2, (request(0),))
         .await?;
@@ -476,3 +477,35 @@ async fn verify_rename_denial(
 #[cfg(test)]
 #[path = "native_tests.rs"]
 mod tests;
+
+async fn verify_stale_native_permission(
+    proxy: &tinybus::Proxy,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let query = tinysecurity_bus::PermissionRequest2::PrivacyCheck(
+        tinysecurity_bus::PrivacyCheckRequest2 {
+            privacy: tinysecurity_bus::PrivacyMode::Standard,
+            external: true,
+            class: tinysecurity_bus::PrivacyDataClass2::Metadata,
+            destination_label: "private-native-permission-destination".into(),
+            risk: None,
+        },
+    );
+    assert_eq!(format!("{query:?}"), "PermissionRequest2([REDACTED])");
+    let stale: tinysecurity_bus::PermissionAuditResponse2 = proxy
+        .call_confidential(
+            names::methods::CHECK_PERMISSION_AUDITED2,
+            (AuditedRequest2 {
+                request: query,
+                audit: AuditCorrelation2 {
+                    event_id: "e".repeat(32),
+                    expected_tail: 0,
+                    generation: 0,
+                },
+            },),
+        )
+        .await?;
+    assert!(stale.decision.is_none());
+    assert!(!stale.audit.permitted && !stale.audit.committed);
+    assert!(stale.audit.receipt.is_none());
+    Ok(())
+}

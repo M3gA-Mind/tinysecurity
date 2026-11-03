@@ -17,7 +17,7 @@ pub enum Backend {
     Os,
     /// Linux kernel keyring.
     LinuxKernel,
-    /// Linux Secret Service; not compiled into this module, so opening it fails closed.
+    /// Linux Secret Service; available only with the explicit feature.
     SecretService,
     /// Protected encrypted file store with a module-owned key file.
     EncryptedFile(PathBuf),
@@ -33,6 +33,8 @@ pub fn open(service: &str, backend: Backend) -> Result<Arc<dyn SecretStore>> {
         Backend::Os => Ok(Arc::new(KeyringSecrets::new(service))),
         #[cfg(target_os = "linux")]
         Backend::LinuxKernel => Ok(Arc::new(KeyringSecrets::linux_kernel(service))),
+        #[cfg(all(target_os = "linux", feature = "keyring-secret-service"))]
+        Backend::SecretService => Ok(Arc::new(KeyringSecrets::secret_service(service))),
         Backend::EncryptedFile(dir) => {
             if !dir.is_absolute() || service.is_empty() {
                 return Err(Error::InvalidInput);

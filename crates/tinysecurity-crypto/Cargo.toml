@@ -7,9 +7,18 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["native-storage"]
+# Driver-backed native secret storage is retained for current default users.
+native-storage = ["dep:tinystoragedrivers"]
+# Linux Secret Service is an explicit opt-in; it never changes the default.
+keyring-secret-service = ["native-storage", "tinystoragedrivers/keyring-secret-service"]
+# Wire-compatible device pairing and tunnel crypto without storage drivers.
+device-pairing = []
+
 [dependencies]
 # Reuse owner secret ports and encryption instead of copying implementations.
-tinystoragedrivers.workspace = true
+tinystoragedrivers = { workspace = true, optional = true }
 # Transport-free device operation vocabulary and exact binding digest.
 tinysecurity-bus.workspace = true
 # Consume move-only native Human Once App I/O authority inside the owner.

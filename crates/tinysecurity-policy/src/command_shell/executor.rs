@@ -45,6 +45,8 @@ pub(crate) fn is_command_executor(command: &str) -> bool {
                 | "nodejs"
                 | "deno"
                 | "bun"
+                | "php"
+                | "lua"
                 // Windows / PowerShell arbitrary-code launchers + LOLBins
                 | "iex"
                 | "invoke-expression"

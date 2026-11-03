@@ -62,6 +62,7 @@ golden!(AuditSinkRequest, roundtrip_audit_sink_request);
 golden!(AuditSinkResponse, roundtrip_audit_sink_response);
 golden!(KeyringConsentRequest, roundtrip_keyring_consent_request);
 golden!(KeyringConsentResponse, roundtrip_keyring_consent_response);
+golden!(KeyringConsentResponse2, roundtrip_keyring_consent_response2);
 golden!(CallerContext, roundtrip_caller_context);
 golden!(ToolCall, roundtrip_tool_call);
 golden!(EvaluateRequest, roundtrip_evaluate_request);
@@ -343,7 +344,7 @@ fn redactor_init_is_additive_and_secrets_never_enter_public_info()
         serde_json::to_value(&config)?["redactor"]["secrets"][0],
         "literal-private"
     );
-    assert_eq!(CONTRACT_VERSION, (1, 29));
+    assert_eq!(CONTRACT_VERSION, (1, 35));
     for (mode, wire) in [
         (RedactMode::Text, "text"),
         (RedactMode::StructuredArguments, "structured_arguments"),

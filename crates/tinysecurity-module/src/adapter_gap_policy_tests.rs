@@ -546,6 +546,67 @@ async fn privacy_check_decides_and_reports_the_live_generation() -> TestResult {
 }
 
 #[tokio::test]
+async fn provider_endpoint_classification_is_locality_only_not_lan_reachability() -> TestResult {
+    let service = service()?;
+    for (host, expected) in [
+        (
+            "localhost",
+            tinysecurity_bus::ProviderEndpointLocality2::OnDevice,
+        ),
+        (
+            "[::ffff:127.0.0.1]",
+            tinysecurity_bus::ProviderEndpointLocality2::OnDevice,
+        ),
+        (
+            "192.168.1.12",
+            tinysecurity_bus::ProviderEndpointLocality2::External,
+        ),
+        (
+            "[fd00::12]",
+            tinysecurity_bus::ProviderEndpointLocality2::External,
+        ),
+    ] {
+        let response: tinysecurity_bus::ProviderEndpointResponse2 = call(
+            &service,
+            names::methods::CLASSIFY_PROVIDER_ENDPOINT2,
+            tinysecurity_bus::ProviderEndpointRequest2 { host: host.into() },
+        )
+        .await?;
+        assert_eq!(response.locality, expected, "{host}");
+        let mut privacy_request =
+            privacy(PrivacyMode::LocalOnly, PrivacyDataClass2::UserContent, None);
+        privacy_request.external =
+            expected == tinysecurity_bus::ProviderEndpointLocality2::External;
+        let privacy_response: PrivacyCheckResponse2 =
+            call(&service, names::methods::PRIVACY_CHECK2, privacy_request).await?;
+        let expected_verdict = if expected == tinysecurity_bus::ProviderEndpointLocality2::OnDevice
+        {
+            Verdict::Allow
+        } else {
+            Verdict::Deny {
+                reason: DenialReason::Privacy,
+            }
+        };
+        assert_eq!(
+            privacy_response.decision.verdict, expected_verdict,
+            "{host}"
+        );
+    }
+    assert!(
+        call::<_, tinysecurity_bus::ProviderEndpointResponse2>(
+            &service,
+            names::methods::CLASSIFY_PROVIDER_ENDPOINT2,
+            tinysecurity_bus::ProviderEndpointRequest2 {
+                host: "bad host".into(),
+            },
+        )
+        .await
+        .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn host_action_class_does_not_depend_on_audit_configuration() -> TestResult {
     // Without a required audit configured the members answer; the informational
     // classification never depends on audit configuration.

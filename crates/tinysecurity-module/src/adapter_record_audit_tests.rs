@@ -76,7 +76,7 @@ async fn recording_service(
     }
     let service = service_for(
         policy,
-        Some(Arc::new(crate::callbacks::AuditClient::new(
+        Some(Arc::new(crate::callbacks::AuditClient::new_for_test(
             module,
             binding,
             permission_audit_config(required),

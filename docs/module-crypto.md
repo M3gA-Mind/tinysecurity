@@ -187,7 +187,8 @@ decrypt unchanged. At most two derivations run at once and there is no wait queu
 `KeyringAccess2` reads, writes or deletes a named secret on a backend chosen at
 init: platform default (Keychain, Credential Manager, Linux kernel keyring),
 Linux kernel keyring, or a protected encrypted file in an absolute directory.
-Linux Secret Service is not compiled into this module and fails closed. Every
+Linux Secret Service is enabled in Linux release artifacts; other builds keep
+the feature opt-in and fail closed when it is not compiled. Every
 operation first calls the host's `ai.tinyhumans.tinysecurity.KeyringConsent2`
 `Consent` callback with the verified caller, purpose, access kind and secret name
 (never the value), and proceeds only on an explicit allow. Invalid names or

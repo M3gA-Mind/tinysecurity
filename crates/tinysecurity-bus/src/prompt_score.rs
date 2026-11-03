@@ -5,7 +5,9 @@
 //! `Allow`, `Review` or `Block` tier it falls in and the content-free rule codes that
 //! contributed, in detection order. The module owns the rules, the weights and the
 //! thresholds; the host only maps a tier to its own handling. A tier is context and
-//! never authorizes execution.
+//! never authorizes execution. Inputs above the 64 KiB scorer ceiling receive
+//! `Review` with `input.oversized` and a zero score, so callers fail closed
+//! without attempting a partial scan.
 use serde::{Deserialize, Serialize};
 
 /// Score at or above which a prompt is `Review`, in thousandths.
