@@ -76,9 +76,39 @@ def verify_release_assets(directory: Path) -> None:
             raise ValueError(f"SHA-256 mismatch for {archive.name}")
 
 
+def archive_sha256(manifest_path: Path, archive: str) -> str:
+    """Return `archive`'s digest from the manifest's `[sha256]` table only.
+
+    The same archive name is also a key of `[library_sha256]`, so a text
+    search over the whole file finds two digests.
+    """
+    try:
+        manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"cannot read checksum manifest: {error}") from error
+    checksums = manifest.get("sha256")
+    if not isinstance(checksums, dict):
+        raise ValueError("checksum.toml must contain a [sha256] table")
+    declared = checksums.get(archive)
+    if not isinstance(declared, str) or not re.fullmatch(r"[0-9a-f]{64}", declared):
+        raise ValueError(f"no valid SHA-256 for {archive} in [sha256]")
+    return declared
+
+
 def main() -> int:
+    if len(sys.argv) == 4 and sys.argv[1] == "--sha256":
+        try:
+            print(archive_sha256(Path(sys.argv[2]), sys.argv[3]))
+        except ValueError as error:
+            print(error, file=sys.stderr)
+            return 1
+        return 0
     if len(sys.argv) != 2:
-        print(f"usage: {Path(sys.argv[0]).name} RELEASE_ASSET_DIRECTORY", file=sys.stderr)
+        print(
+            f"usage: {Path(sys.argv[0]).name} RELEASE_ASSET_DIRECTORY\n"
+            f"       {Path(sys.argv[0]).name} --sha256 CHECKSUM_TOML ARCHIVE",
+            file=sys.stderr,
+        )
         return 2
     try:
         verify_release_assets(Path(sys.argv[1]))
