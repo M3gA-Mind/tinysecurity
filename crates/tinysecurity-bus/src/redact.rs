@@ -84,13 +84,15 @@ pub struct ScanPromptRequest {
     /// Prompt to scan.
     pub text: String,
 }
-/// `ScanToolDefinitionRequest` payload.
+/// `ScanToolDefinitionRequest` payload. `definition_json` must serialize the
+/// complete tool definition as a JSON object (including schema and metadata);
+/// an MCP registry caller builds that object before making the bus call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScanToolDefinitionRequest {
     /// Tool identity.
     pub name: String,
-    /// Tool schema encoded as JSON.
+    /// Complete tool definition encoded as a JSON object, built by the caller.
     pub definition_json: String,
 }
 /// `ScanResponse` payload.

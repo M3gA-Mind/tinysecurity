@@ -31,6 +31,27 @@ fn a_call_literal_is_removed_in_every_text_mode() -> Result<()> {
 }
 
 #[test]
+fn a_call_literal_is_removed_in_url_encoded_and_base64_forms() -> Result<()> {
+    let cache = ExtendedRedactors::new();
+    let secret = "Composio-Key_123";
+    let encoded = "Composio%2DKey%5F123";
+    let base64 = "Q29tcG9zaW8tS2V5XzEyMw==";
+    let url_base64 = "Q29tcG9zaW8tS2V5XzEyMw";
+    let output = cache.redact(
+        &base(&[])?,
+        &request(
+            &format!("url={encoded} basic={base64} urlsafe={url_base64}"),
+            RedactMode::Text,
+            &[secret],
+        ),
+    )?;
+    for form in [encoded, base64, url_base64] {
+        assert!(!output.text.contains(form), "{}", output.text);
+    }
+    Ok(())
+}
+
+#[test]
 fn a_call_literal_is_removed_from_structured_arguments_too() -> Result<()> {
     let cache = ExtendedRedactors::new();
     let out = cache.redact(

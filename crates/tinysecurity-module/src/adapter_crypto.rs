@@ -19,7 +19,7 @@ use tinysecurity::crypto::{
     secretstore::{SecretStore, Zeroizing},
 };
 use tinysecurity_bus::{
-    CryptoConfig2, KeyringAccess2, KeyringBackend2, KeyringConsentRequest2,
+    CryptoConfig2, KeyringAccess2, KeyringBackend2, KeyringConsentOutcome2, KeyringConsentRequest2,
     KeyringConsentResponse2, KeyringOperation2, KeyringRequest2, KeyringResponse2,
     MAX_CRYPTO_PAYLOAD_BYTES, PairingOperation2, PairingRequest2, PairingResponse2,
     PasswordOperation2, PasswordPayload2, PasswordRequest2, PasswordResponse2, callback_names2,
@@ -33,6 +33,18 @@ const PASSWORD_PERMITS: usize = 2;
 
 fn denied() -> tinybus::Error {
     tinybus::Error::failed("crypto authority denied")
+}
+fn consent_error(outcome: KeyringConsentOutcome2) -> tinybus::Error {
+    let name = match outcome {
+        KeyringConsentOutcome2::ConsentPending => "ai.tinyhumans.tinysecurity.Error.ConsentPending",
+        KeyringConsentOutcome2::ConsentDenied => "ai.tinyhumans.tinysecurity.Error.ConsentDenied",
+        KeyringConsentOutcome2::Unavailable => "ai.tinyhumans.tinysecurity.Error.Unavailable",
+        KeyringConsentOutcome2::Allowed => return denied(),
+    };
+    tinybus::Error::MethodFailed {
+        name: name.to_owned(),
+        message: "keyring consent outcome".to_owned(),
+    }
 }
 fn control_free(text: &str, max: usize) -> bool {
     !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
@@ -479,8 +491,14 @@ async fn consent(
             },),
         )
         .await
-        .map_err(|_| denied())?;
-    if reply.allowed { Ok(()) } else { Err(denied()) }
+        .map_err(|error| match error {
+            tinybus::Error::Timeout { .. } => consent_error(KeyringConsentOutcome2::ConsentPending),
+            _ => consent_error(KeyringConsentOutcome2::Unavailable),
+        })?;
+    match reply.outcome {
+        KeyringConsentOutcome2::Allowed => Ok(()),
+        outcome => Err(consent_error(outcome)),
+    }
 }
 
 enum Access {

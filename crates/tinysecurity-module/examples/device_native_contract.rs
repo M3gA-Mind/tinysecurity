@@ -1,4 +1,6 @@
 //! Actual hashed native device dispatch, confidential routing and verified callbacks.
+#[path = "device_native_contract/bound_callbacks.rs"]
+mod bound_callbacks;
 #[path = "device_native_contract/fixture.rs"]
 mod fixture;
 #[path = "approval_native_contract/namespace.rs"]
@@ -7,12 +9,126 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tinybus::{Connection, broker::Broker, module::ModuleHost, transport::memory::MemoryBus};
-use tinysecurity_bus::{
-    ApprovalConfig2, ApprovalRow2, DeviceFrameOperation2, DeviceFrameRequest2,
-    DeviceFrameResponse2, DeviceKeyPurpose2, DeviceOperation2, DeviceResponse2, DeviceRole2,
-    EvaluateDeviceRequest2, ExecuteDeviceRequest2, ModuleConfig, PolicyInfo, names,
+use tinybus::{
+    Connection,
+    broker::Broker,
+    module::{HostCallbackEndpoint, HostCallbackProxy, ModuleHost},
+    transport::memory::MemoryBus,
 };
+use tinysecurity_bus::{
+    ApprovalConfig2, ApprovalRow2, AuditEventReceipt2, AuditSinkRequest2, AuditSinkResponse2,
+    DeviceFrameOperation2, DeviceFrameRequest2, DeviceFrameResponse2, DeviceKeyPurpose2,
+    DeviceOperation2, DeviceResponse2, DeviceRole2, EvaluateDeviceRequest2, ExecuteDeviceRequest2,
+    ModuleConfig, PolicyInfo, names,
+};
+#[derive(Clone)]
+struct Sink;
+#[tinybus::interface(name = "ai.tinyhumans.tinysecurity.AuditSink2")]
+impl Sink {
+    async fn append(&self, request: AuditSinkRequest2) -> tinybus::Result<AuditSinkResponse2> {
+        std::future::ready(Ok(AuditSinkResponse2 {
+            scope: request.scope,
+            stream_id: request.stream_id,
+            new_tail: request.events[0].sequence,
+            events: request
+                .events
+                .into_iter()
+                .map(|event| AuditEventReceipt2 {
+                    event_id: event.event_id,
+                    sequence: event.sequence,
+                })
+                .collect(),
+        }))
+        .await
+    }
+}
+
+async fn load_bound_module(
+    lifecycle: &ModuleHost,
+    library: &std::path::Path,
+    host: &Connection,
+    mut configuration: ModuleConfig,
+    store: Arc<Mutex<fixture::store::DiskStore>>,
+) -> std::result::Result<
+    (
+        tinybus::module::HostCallbackBinding,
+        HostCallbackProxy,
+        String,
+        tinybus::BusName,
+        ModuleConfig,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let path: tinybus::ObjectPath = tinysecurity_bus::callback_names2::OBJECT_PATH.parse()?;
+    let endpoint = |interface: &str, members: &[&str]| -> tinybus::Result<HostCallbackEndpoint> {
+        Ok(HostCallbackEndpoint {
+            path: path.clone(),
+            interface: interface.parse()?,
+            members: members
+                .iter()
+                .map(|member| (*member).parse())
+                .collect::<tinybus::Result<_>>()?,
+        })
+    };
+    let binding = lifecycle
+        .prepare_host_callbacks(vec![
+            endpoint(
+                tinysecurity_bus::callback_names2::APPROVAL_STORE,
+                &[
+                    tinysecurity_bus::callback_names2::LOAD,
+                    tinysecurity_bus::callback_names2::CAS,
+                ],
+            )?,
+            endpoint(
+                tinysecurity_bus::callback_names2::APPROVAL_PROMPT,
+                &[
+                    tinysecurity_bus::callback_names2::PROMPT,
+                    tinysecurity_bus::callback_names2::VERIFY_HUMAN,
+                ],
+            )?,
+            endpoint(
+                tinysecurity_bus::callback_names2::AUDIT_SINK,
+                &[tinysecurity_bus::callback_names2::APPEND],
+            )?,
+        ])
+        .await?;
+    configuration.trusted_host = Some(binding.unique_name().to_string());
+    let guard = binding.guard();
+    let module_proxy = Arc::new(std::sync::OnceLock::new());
+    let scope = tinysecurity::approval::scope_handle(&fixture::registration().subject)?;
+    for interface in [
+        tinysecurity_bus::callback_names2::APPROVAL_STORE,
+        tinysecurity_bus::callback_names2::APPROVAL_PROMPT,
+    ] {
+        binding
+            .serve_at(
+                path.clone(),
+                bound_callbacks::callback::Callback {
+                    guard: guard.clone(),
+                    module_proxy: module_proxy.clone(),
+                    interface: interface.parse()?,
+                    scope: scope.clone(),
+                    store: store.clone(),
+                    reentrant: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    prompt_failure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                },
+            )
+            .await?;
+    }
+    binding.serve_at(path, Sink).await?;
+    let loaded = lifecycle
+        .load_file_with_host_callbacks(library, serde_json::to_value(&configuration)?, &binding)
+        .await?;
+    let module = wait_owner(host).await?;
+    let proxy = binding
+        .proxy(module.as_str(), names::OBJECT_PATH, names::INTERFACE)?
+        .with_timeout(Duration::from_secs(10));
+    module_proxy
+        .set(proxy.clone())
+        .map_err(|_| "fixture module proxy already initialized")?;
+    assert!(proxy.attestation().await?.is_some());
+    Ok((binding, proxy, loaded.name, module, configuration))
+}
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let library = std::path::PathBuf::from(
@@ -51,23 +167,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ))),
         ..Default::default()
     };
-    let loaded =
-        lifecycle.load_file_with_config(&library, serde_json::to_value(&configuration)?)?;
-    let module = wait_owner(&host).await?;
     let store = Arc::new(Mutex::new(fixture::store::DiskStore::open(
         &root.join("approvals.journal"),
     )?));
-    fixture::serve_callbacks(&host, &module, &store, true).await?;
-    let proxy = host
-        .proxy(module.as_str(), names::OBJECT_PATH, names::INTERFACE)?
-        .with_timeout(Duration::from_secs(10));
+    let (_binding, proxy, loaded_name, module, configuration) =
+        load_bound_module(&lifecycle, &library, &host, configuration, store.clone()).await?;
     credential_root_checks(&proxy).await?;
     routing_checks(&proxy, &bus, &module).await?;
     let mut sequence = 1;
     let (key, stale_tunnel) = native_protocols(&proxy, &store, &mut sequence).await?;
-    let observer = generation_boundary(
+    let observer = callback_configuration_fence(
         &lifecycle,
-        &loaded.name,
+        &loaded_name,
         configuration,
         &proxy,
         &store,
@@ -76,7 +187,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     let after: PolicyInfo = proxy.call(names::methods::POLICY_INFO, ()).await?;
-    assert_eq!(after.generation, 2);
+    assert_eq!(after.generation, 1);
     verify_journals(&root)?;
     lifecycle.shutdown(Duration::from_secs(5)).await;
     assert!(
@@ -106,13 +217,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     task.abort();
     assert_eq!(hash, tinybus::module::sha256_file(&library)?);
     println!(
-        "native device: SHA256={hash}; verified CredentialRoots2 native resolution + home-none isolation + peer + confidential DeviceFrame2 Seal/Open + no frame approval rows + cross-scope/replay/revoke/stale-generation denial + existing approved v2/v3/v4 flows + shutdown passed"
+        "native device: SHA256={hash}; verified CredentialRoots2 native resolution + home-none isolation + peer + confidential DeviceFrame2 Seal/Open + no frame approval rows + cross-scope/replay/revoke + callback-bound config mutation refusal + existing approved v2/v3/v4 flows + shutdown passed"
     );
     Ok(())
 }
 
 async fn credential_root_checks(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     use tinysecurity_bus::{CredentialRootsRequest2, CredentialRootsResponse2};
 
@@ -148,7 +259,7 @@ async fn credential_root_checks(
     Ok(())
 }
 async fn native_tunnel(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     store: &Arc<Mutex<fixture::store::DiskStore>>,
     sequence: &mut u64,
     own: &str,
@@ -236,7 +347,7 @@ async fn native_tunnel(
 }
 
 async fn verify_frame_dispatch(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     store: &Arc<Mutex<fixture::store::DiskStore>>,
     tunnel: &str,
     peer_tunnel: &mut tinysecurity::crypto::device::Tunnel,
@@ -321,7 +432,7 @@ async fn verify_frame_dispatch(
 }
 
 async fn verify_revoked_tunnel(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     store: &Arc<Mutex<fixture::store::DiskStore>>,
     sequence: &mut u64,
     own: &str,
@@ -379,7 +490,7 @@ async fn verify_revoked_tunnel(
     Ok(())
 }
 async fn routing_checks(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     bus: &MemoryBus,
     module: &tinybus::BusName,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -449,7 +560,7 @@ async fn routing_checks(
     Ok(())
 }
 async fn handshake_roundtrip(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     store: &Arc<Mutex<fixture::store::DiskStore>>,
     sequence: &mut u64,
     client: &str,
@@ -497,7 +608,7 @@ async fn handshake_roundtrip(
     Ok(())
 }
 async fn native_protocols(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     store: &Arc<Mutex<fixture::store::DiskStore>>,
     sequence: &mut u64,
 ) -> std::result::Result<(String, String), Box<dyn std::error::Error>> {
@@ -597,60 +708,40 @@ async fn native_protocols(
     let stale_tunnel = native_tunnel(proxy, store, sequence, &observer, &observer_public).await?;
     Ok((observer, stale_tunnel))
 }
-async fn generation_boundary(
+async fn callback_configuration_fence(
     lifecycle: &ModuleHost,
     name: &str,
-    mut configuration: ModuleConfig,
-    proxy: &tinybus::Proxy,
+    configuration: ModuleConfig,
+    proxy: &HostCallbackProxy,
     store: &Arc<Mutex<fixture::store::DiskStore>>,
     sequence: &mut u64,
     handles: (String, String),
 ) -> std::result::Result<String, Box<dyn std::error::Error>> {
-    let (key, stale_tunnel) = handles;
-    // Actual SDK reinit retains the callback peer/registrations while advancing generation.
-    for scope in &mut configuration
-        .device
-        .as_mut()
-        .ok_or("fixture config")?
-        .scopes
-    {
+    let (_key, _stale_tunnel) = handles;
+    let mut changed = configuration.clone();
+    for scope in &mut changed.device.as_mut().ok_or("fixture config")?.scopes {
         scope.static_secret = None;
     }
-    configuration
-        .device
-        .as_mut()
-        .ok_or("fixture config")?
-        .max_handles = 16;
-    lifecycle
-        .reinitialize(name, serde_json::to_value(configuration)?)
-        .await?;
-    // Valid new-generation approval/audit receipts cannot revive the old handle.
-    assert!(
-        fixture::run_at(
-            proxy,
-            store,
-            sequence,
-            DeviceOperation2::Revoke { handle: key },
-            2
-        )
+    changed.device.as_mut().ok_or("fixture config")?.max_handles = 16;
+    let Err(reinit_error) = lifecycle
+        .reinitialize(name, serde_json::to_value(changed)?)
         .await
-        .is_err()
-    );
+    else {
+        return Err("callback-bound configuration change was accepted".into());
+    };
     assert!(
-        proxy
-            .call_confidential::<DeviceFrameResponse2>(
-                names::methods::DEVICE_FRAME2,
-                (DeviceFrameRequest2 {
-                    scope_id: "a".repeat(32),
-                    handle: stale_tunnel,
-                    call_id: "module-frame-after-reinit".into(),
-                    operation: DeviceFrameOperation2::Seal { plaintext: vec![] },
-                },),
-            )
-            .await
-            .is_err(),
-        "reinitialization invalidates old tunnel capabilities"
+        reinit_error
+            .to_string()
+            .contains("scoped callback configuration is immutable")
     );
+    let info: PolicyInfo = proxy.call(names::methods::POLICY_INFO, ()).await?;
+    assert_eq!(info.generation, 1);
+    let module = lifecycle
+        .list()
+        .into_iter()
+        .find(|module| module.name == name)
+        .ok_or("loaded module")?;
+    assert!(matches!(module.state, tinybus::module::ModuleState::Ready));
     let current = fixture::run_at(
         proxy,
         store,
@@ -658,7 +749,7 @@ async fn generation_boundary(
         DeviceOperation2::Key {
             purpose: DeviceKeyPurpose2::Static,
         },
-        2,
+        1,
     )
     .await?;
     let observer = current.handle.ok_or("fixture handle")?;

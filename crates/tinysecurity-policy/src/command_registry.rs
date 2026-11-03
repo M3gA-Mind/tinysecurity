@@ -101,6 +101,30 @@ impl RegisteredCommandPolicy {
         }
         Ok(decision)
     }
+    /// Check actual execution and return a refundable action reservation for Allow.
+    /// Prompts, blocks, disabled scopes and exhausted budgets do not reserve.
+    ///
+    /// The caller must commit the reservation only when its own pre-execution
+    /// requirements have completed. Dropping it refunds the action.
+    ///
+    /// # Errors
+    /// Rejects oversized input or poisoned accounting state.
+    pub fn check_guarded(
+        self: &Arc<Self>,
+        request: &CommandRequest,
+    ) -> Result<(CommandDecision, Option<Spent>)> {
+        let mut decision = self.scope.evaluate(request)?;
+        if decision.gate != CommandGate::Allow || !self.scope.policy().enabled {
+            return Ok((decision, None));
+        }
+        if let Some(spent) = self.reserve_guarded() {
+            Ok((decision, Some(spent)))
+        } else {
+            decision.gate = CommandGate::Block;
+            decision.denial = Some(CommandDenial::RateLimit);
+            Ok((decision, None))
+        }
+    }
     /// Gate a command without reserving an action (contract 1.20): the class gate, the
     /// hidden-execution defence, the protected-path floor and the mode's admission
     /// rules, but never the hourly budget. A host asking "may this run" before a human

@@ -675,10 +675,23 @@ fn rule_ids_follow_detection_order_and_stay_content_free() {
 fn registry_rejects_prompts_over_the_work_ceiling() {
     let registry = crate::Redactor::new(&tinysecurity_bus::RedactorConfig::default())
         .unwrap_or_else(|_| unreachable!());
-    let result = registry.scan_prompt_scored(&tinysecurity_bus::ScanPromptScoredRequest2 {
+    let result = registry.scan_prompt(&tinysecurity_bus::ScanPromptRequest {
         text: "a".repeat(crate::MAX_INPUT + 1),
     });
     assert!(result.is_err());
+}
+
+#[test]
+fn scan_prompt2_reviews_oversized_prompts_without_echoing_them() {
+    let registry = crate::Redactor::new(&tinysecurity_bus::RedactorConfig::default())
+        .unwrap_or_else(|_| unreachable!());
+    let result = registry
+        .scan_prompt_scored(&tinysecurity_bus::ScanPromptScoredRequest2 {
+            text: "a".repeat(crate::MAX_INPUT + 1),
+        })
+        .unwrap_or_else(|_| unreachable!());
+    assert_eq!(result.tier, PromptTier2::Review);
+    assert_eq!(result.rule_ids, ["input.oversized"]);
 }
 
 #[test]

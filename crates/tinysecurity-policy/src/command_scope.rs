@@ -1,6 +1,6 @@
 //! Immutable command classification and both host execution-policy flows.
 use crate::command_shell::{
-    classify::{classify_segment, has_hidden_execution, has_hidden_execution_lexical},
+    classify::{classify_segment_source, has_hidden_execution, has_hidden_execution_lexical},
     env_guard::has_dangerous_env_prefix,
     executor::is_command_executor,
     scan::{
@@ -49,23 +49,7 @@ impl CommandScope {
         let command = self.shell_source(&native);
         let mut class = CommandClass::Read;
         for segment in split_unquoted_segments(&command) {
-            let Some(words) = self.words(&segment) else {
-                class = class.max(CommandClass::Write);
-                continue;
-            };
-            if let Some(base) = words.first() {
-                let base = normalized_command_name(base);
-                let args = words
-                    .iter()
-                    .skip(1)
-                    .map(|word| word.to_ascii_lowercase())
-                    .collect::<Vec<_>>();
-                class = class.max(classify_segment(
-                    &base,
-                    &args,
-                    &words.join(" ").to_ascii_lowercase(),
-                ));
-            }
+            class = class.max(classify_segment_source(&segment));
         }
         if contains_unquoted_char(&command, '>')
             || command
@@ -194,13 +178,24 @@ impl CommandScope {
     }
     fn literal_allowed(&self, word: &str) -> bool {
         let word = word.trim_matches(|c| matches!(c, ':' | '<' | '>' | '&' | '|'));
-        if word.is_empty() || word.contains("://") {
+        if word.is_empty() {
             return true;
         }
+        let file_url_path = word
+            .strip_prefix("file://")
+            .and_then(|_| url::Url::parse(word).ok())
+            .and_then(|url| url.to_file_path().ok());
+        if word.contains("://") && file_url_path.is_none() {
+            return true;
+        }
+        let word = file_url_path.as_ref().map_or_else(
+            || word.to_owned(),
+            |path| path.to_string_lossy().into_owned(),
+        );
         let word = ["${HOME}", "$HOME", "%USERPROFILE%"]
             .iter()
             .find_map(|prefix| word.strip_prefix(prefix).map(|rest| format!("~{rest}")))
-            .unwrap_or_else(|| word.to_string());
+            .unwrap_or(word);
         if protected_path(Path::new(&word)) {
             return false;
         }

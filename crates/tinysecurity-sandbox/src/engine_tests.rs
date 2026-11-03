@@ -94,6 +94,7 @@ pub(crate) fn fixture() -> std::result::Result<
         limits: ResourceLimits2::default(),
         deny_subprocesses: false,
         accept_process_isolation: false,
+        credential_denials: vec![],
         options: SandboxPlanOptions2::default(),
         generation: 1,
         ttl_ms: 1000,

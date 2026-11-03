@@ -17,6 +17,8 @@ crate-type = ["rlib", "cdylib"]
 default = []
 # Enables the private deterministic resolver fixture in debug native test builds only.
 native-security-tests = []
+# Explicit Linux Secret Service support for hosts that need it.
+keyring-secret-service = ["tinysecurity/keyring-secret-service"]
 
 [dependencies]
 # Handwritten contextual authority wrapper around generated typed dispatch.

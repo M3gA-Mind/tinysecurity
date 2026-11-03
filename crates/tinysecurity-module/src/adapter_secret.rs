@@ -103,6 +103,26 @@ fn slot(value: MasterSlotKind2, user: &str) -> (MasterSlot, String) {
 fn id(value: &str) -> bool {
     value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
+fn unique_config_master_for_scope<'a>(
+    registrations: impl Iterator<Item = &'a SecretRegistration2>,
+    scope_id: &str,
+) -> tinybus::Result<&'a SecretRegistration2> {
+    let mut matches = registrations.filter(|registration| {
+        registration.approval_scope_id == scope_id
+            && registration.purpose == MasterPurpose2::ConfigUserMaster
+    });
+    let registration = matches.next().ok_or_else(denied)?;
+    if matches.next().is_some() {
+        return Err(denied());
+    }
+    Ok(registration)
+}
+fn ensure_scope_id_matches(scope_id: &str, canonical: &ApprovalScope2) -> tinybus::Result<()> {
+    if canonical.scope_id != scope_id {
+        return Err(denied());
+    }
+    Ok(())
+}
 #[derive(Default)]
 struct Inventory {
     registrations: BTreeSet<String>,
@@ -268,6 +288,25 @@ impl SecretState {
             return Err(denied());
         }
         Ok(reg.scope.read().map_err(|_| denied())?.clone())
+    }
+    /// Find the unique live `ConfigUserMaster` binding for one canonical approval scope.
+    /// The caller supplies no registration alias; ambiguity fails closed.
+    pub(super) fn config_master_for_scope(
+        &self,
+        scope_id: &str,
+    ) -> tinybus::Result<(SecretRegistration2, ApprovalScope2)> {
+        let dynamic = self.dynamic.lock().map_err(|_| denied())?;
+        let descriptors = self
+            .registered
+            .values()
+            .chain(dynamic.values())
+            .map(|registration| &registration.descriptor);
+        let descriptor = unique_config_master_for_scope(descriptors, scope_id)?.clone();
+        drop(dynamic);
+        let registration = self.registration_id(&descriptor.registration_id)?;
+        let canonical = registration.scope.read().map_err(|_| denied())?.clone();
+        ensure_scope_id_matches(scope_id, &canonical)?;
+        Ok((descriptor, canonical))
     }
     pub(super) fn prepare_cipher(
         &self,

@@ -39,6 +39,469 @@ const SCOPE_ID: &str = "0123456789abcdef0123456789abcdef";
 const FRAME_HANDLE: &str = "abcdef0123456789abcdef0123456789";
 const SECOND_FRAME_HANDLE: &str = "bcdef0123456789abcdef0123456789a";
 
+#[test]
+#[allow(clippy::too_many_lines)] // Pins the admitted scope bindings and each rejected authority input.
+fn runtime_pairing_scope_derives_secret_and_backend_bindings_from_init_policy() -> TestResult {
+    use tinysecurity_bus::{
+        AccessTier, ApprovalScope2, DevicePairingRuntimeScope2, MasterPurpose2, MasterSlotKind2,
+        Origin, SecretBinding2, SecretRegistration2, SubjectScope,
+    };
+
+    let approval = ApprovalScope2 {
+        scope_id: SCOPE_ID.into(),
+        subject: SubjectScope {
+            user: "real-user".into(),
+            workspace: "workspace".into(),
+            agent: "agent".into(),
+        },
+        policy_ref: "policy".into(),
+        generation: 7,
+        ceiling: AccessTier::Full,
+        require_approval: true,
+        auto_approve_all: false,
+    };
+    let secret = SecretRegistration2 {
+        registration_id: "b".repeat(32),
+        approval_scope_id: SCOPE_ID.into(),
+        origin: Origin::Operator,
+        purpose: MasterPurpose2::ConfigUserMaster,
+        target: SecretBinding2 {
+            backend_id: "c".repeat(32),
+            slot: MasterSlotKind2::User,
+        },
+        legacy: vec![],
+    };
+    let defaults = DevicePairingRuntimeScope2 {
+        persistence_backend_id: "pairing-state".into(),
+        legacy_device_backend_id: Some("d".repeat(32)),
+        allowed_origins: vec![Origin::Operator],
+    };
+    assert!(validate_runtime_defaults(&defaults).is_ok());
+    let (scope, origin) = derive_runtime_scope(&approval, &secret, &defaults)?;
+    assert_eq!(scope.scope_id, approval.scope_id);
+    assert_eq!(scope.secret_registration_id, secret.registration_id);
+    assert_eq!(
+        scope.persistence_backend_id,
+        defaults.persistence_backend_id
+    );
+    assert_eq!(
+        scope.legacy_device_backend_id,
+        defaults.legacy_device_backend_id
+    );
+    assert_eq!(
+        scope.legacy_source_registration_id.as_deref(),
+        Some(secret.registration_id.as_str())
+    );
+    assert_eq!(origin, Origin::Operator);
+    let denied_approval = ApprovalScope2 {
+        require_approval: false,
+        ..approval.clone()
+    };
+    assert!(validate_runtime_approval_snapshot(&approval, approval.generation).is_ok());
+    assert!(validate_runtime_approval_snapshot(&denied_approval, approval.generation).is_err());
+    assert!(validate_runtime_approval_snapshot(&approval, approval.generation + 1).is_err());
+    let automatic_approval = ApprovalScope2 {
+        auto_approve_all: true,
+        ..approval.clone()
+    };
+    assert!(validate_runtime_approval_snapshot(&automatic_approval, approval.generation).is_err());
+    assert!(validate_secret_scope_binding(&approval, &approval, &approval).is_ok());
+    let changed_secret_scope = ApprovalScope2 {
+        subject: SubjectScope {
+            user: "different-user".into(),
+            ..approval.subject.clone()
+        },
+        ..approval.clone()
+    };
+    assert!(validate_secret_scope_binding(&approval, &changed_secret_scope, &approval).is_err());
+    assert!(validate_secret_scope_binding(&approval, &approval, &changed_secret_scope).is_err());
+    assert!(derive_runtime_scope(&denied_approval, &secret, &defaults).is_err());
+    let mut wrong_purpose = secret.clone();
+    wrong_purpose.purpose = MasterPurpose2::AppEncryptionMaster;
+    assert!(derive_runtime_scope(&approval, &wrong_purpose, &defaults).is_err());
+    let mut wrong_slot = secret.clone();
+    wrong_slot.target.slot = MasterSlotKind2::App;
+    assert!(derive_runtime_scope(&approval, &wrong_slot, &defaults).is_err());
+    let denied_defaults = DevicePairingRuntimeScope2 {
+        allowed_origins: vec![Origin::Copilot],
+        ..defaults.clone()
+    };
+    assert!(derive_runtime_scope(&approval, &secret, &denied_defaults).is_err());
+    let duplicate_defaults = DevicePairingRuntimeScope2 {
+        allowed_origins: vec![Origin::Operator, Origin::Operator],
+        ..defaults.clone()
+    };
+    assert!(validate_runtime_defaults(&duplicate_defaults).is_err());
+    let empty_origins = DevicePairingRuntimeScope2 {
+        allowed_origins: vec![],
+        ..defaults.clone()
+    };
+    assert!(validate_runtime_defaults(&empty_origins).is_err());
+    let invalid_legacy_backend = DevicePairingRuntimeScope2 {
+        legacy_device_backend_id: Some("bad".into()),
+        ..defaults.clone()
+    };
+    assert!(validate_runtime_defaults(&invalid_legacy_backend).is_err());
+    let denied_defaults = DevicePairingRuntimeScope2 {
+        persistence_backend_id: "invalid\nbackend".into(),
+        ..defaults
+    };
+    assert!(validate_runtime_defaults(&denied_defaults).is_err());
+    assert!(derive_runtime_scope(&approval, &secret, &denied_defaults).is_err());
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exercises successful, duplicate, and two rejected admissions.
+fn runtime_pairing_scope_admission_is_idempotent_and_fails_closed_without_partial_state()
+-> TestResult {
+    use std::collections::BTreeMap;
+    use tinysecurity_bus::{
+        AccessTier, ApprovalScope2, DeviceConfig2, DevicePairingScope2, DevicePairingScopeReceipt2,
+        Origin, SubjectScope,
+    };
+
+    let registry = Arc::new(tinysecurity::crypto::device_handles::Registry::new(
+        DeviceConfig2 {
+            scopes: vec![],
+            max_handles: 16,
+            max_in_flight: 2,
+            operations_per_minute: 100,
+            frames_per_minute: 10,
+            max_ttl_ms: 10_000,
+            max_message_bytes: 1024,
+            max_bootstrap_nonces: 1,
+        },
+        &[],
+        ":1.1",
+        1,
+        tinysecurity::crypto::device_handles::Time {
+            wall: 1_000,
+            monotonic: 1_000,
+        },
+    )?);
+    let approval = ApprovalScope2 {
+        scope_id: SCOPE_ID.into(),
+        subject: SubjectScope {
+            user: "user".into(),
+            workspace: "workspace".into(),
+            agent: "agent".into(),
+        },
+        policy_ref: "policy".into(),
+        generation: 1,
+        ceiling: AccessTier::Full,
+        require_approval: true,
+        auto_approve_all: false,
+    };
+    let scope = DevicePairingScope2 {
+        scope_id: SCOPE_ID.into(),
+        secret_registration_id: "b".repeat(32),
+        persistence_backend_id: "pairing-state".into(),
+        legacy_device_backend_id: None,
+        legacy_source_registration_id: None,
+    };
+    let mut epochs = BTreeMap::new();
+    let mut catalog = BTreeMap::new();
+    let now = tinysecurity::crypto::device_handles::Time {
+        wall: 1_001,
+        monotonic: 1_001,
+    };
+    let receipt = admit_runtime_scope(
+        scope.clone(),
+        approval.clone(),
+        Origin::Operator,
+        &registry,
+        1,
+        now,
+        &mut epochs,
+        &mut catalog,
+    )?;
+    assert_eq!(
+        receipt,
+        DevicePairingScopeReceipt2 {
+            scope_id: SCOPE_ID.into(),
+            active: true
+        }
+    );
+    assert_eq!(
+        admit_runtime_scope(
+            scope.clone(),
+            approval.clone(),
+            Origin::Operator,
+            &registry,
+            1,
+            now,
+            &mut epochs,
+            &mut catalog
+        )?,
+        receipt
+    );
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(epochs.len(), 1);
+
+    let mismatched_scope = DevicePairingScope2 {
+        scope_id: "e".repeat(32),
+        ..catalog[SCOPE_ID].clone()
+    };
+    assert!(
+        admit_runtime_scope(
+            mismatched_scope,
+            approval.clone(),
+            Origin::Operator,
+            &registry,
+            1,
+            now,
+            &mut epochs,
+            &mut catalog,
+        )
+        .is_err()
+    );
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(epochs.len(), 1);
+
+    let mut changed = scope;
+    changed.persistence_backend_id = "changed-backend".into();
+    assert!(
+        admit_runtime_scope(
+            changed,
+            approval.clone(),
+            Origin::Operator,
+            &registry,
+            1,
+            now,
+            &mut epochs,
+            &mut catalog
+        )
+        .is_err()
+    );
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(epochs.len(), 1);
+
+    let rejected_approval = ApprovalScope2 {
+        scope_id: "d".repeat(32),
+        require_approval: false,
+        ..approval.clone()
+    };
+    let rejected_scope = DevicePairingScope2 {
+        scope_id: rejected_approval.scope_id.clone(),
+        secret_registration_id: "d".repeat(32),
+        ..catalog[SCOPE_ID].clone()
+    };
+    assert!(
+        admit_runtime_scope(
+            rejected_scope,
+            rejected_approval,
+            Origin::Operator,
+            &registry,
+            1,
+            now,
+            &mut epochs,
+            &mut catalog
+        )
+        .is_err(),
+        "native device registry refusal must prevent either pairing-map insert"
+    );
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(epochs.len(), 1);
+
+    let new_approval = ApprovalScope2 {
+        scope_id: "c".repeat(32),
+        generation: 2,
+        ..approval.clone()
+    };
+    let unregistered = DevicePairingScope2 {
+        scope_id: new_approval.scope_id.clone(),
+        secret_registration_id: "e".repeat(32),
+        ..catalog[SCOPE_ID].clone()
+    };
+    assert!(
+        admit_runtime_scope(
+            unregistered,
+            new_approval,
+            Origin::Operator,
+            &registry,
+            2,
+            now,
+            &mut epochs,
+            &mut catalog
+        )
+        .is_err()
+    );
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(epochs.len(), 1);
+
+    let mut full_epochs = (0..128)
+        .map(|index| (format!("{index:032x}"), 0))
+        .collect::<BTreeMap<_, _>>();
+    let mut full_catalog = (0..128)
+        .map(|index| {
+            let id = format!("{index:032x}");
+            (
+                id.clone(),
+                DevicePairingScope2 {
+                    scope_id: id,
+                    ..catalog[SCOPE_ID].clone()
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let full_scope = DevicePairingScope2 {
+        scope_id: "f".repeat(32),
+        ..catalog[SCOPE_ID].clone()
+    };
+    let full_approval = ApprovalScope2 {
+        scope_id: full_scope.scope_id.clone(),
+        ..approval.clone()
+    };
+    assert!(
+        admit_runtime_scope(
+            full_scope,
+            full_approval,
+            Origin::Operator,
+            &registry,
+            1,
+            now,
+            &mut full_epochs,
+            &mut full_catalog,
+        )
+        .is_err()
+    );
+    assert_eq!(full_catalog.len(), 128);
+    assert_eq!(full_epochs.len(), 128);
+    Ok(())
+}
+
+#[test]
+fn legacy_import_handles_are_single_use_per_pairing_scope() {
+    let mut consumed = std::collections::BTreeSet::new();
+    assert!(consume_legacy_import_handle(&mut consumed, SCOPE_ID, "one-shot-handle", 2,).is_ok());
+    assert!(consume_legacy_import_handle(&mut consumed, SCOPE_ID, "one-shot-handle", 2,).is_err());
+    assert!(
+        consume_legacy_import_handle(&mut consumed, "b".repeat(32).as_str(), "one-shot-handle", 2,)
+            .is_ok()
+    );
+    assert!(consume_legacy_import_handle(&mut consumed, SCOPE_ID, "another-handle", 2,).is_err());
+}
+
+#[test]
+fn dynamic_pairing_catalog_supplies_only_the_requested_scope() -> TestResult {
+    use tinysecurity_bus::{
+        DevicePairingConfig2, DevicePairingRuntimeScope2, DevicePairingScope2, Origin,
+    };
+
+    let scope = DevicePairingScope2 {
+        scope_id: SCOPE_ID.into(),
+        secret_registration_id: "b".repeat(32),
+        persistence_backend_id: "pairing-state".into(),
+        legacy_device_backend_id: Some("c".repeat(32)),
+        legacy_source_registration_id: Some("b".repeat(32)),
+    };
+    let catalog = RwLock::new([(SCOPE_ID.into(), scope.clone())].into());
+    assert_eq!(lookup_scope(&catalog, SCOPE_ID)?, scope);
+    assert!(lookup_scope(&catalog, "d".repeat(32).as_str()).is_err());
+
+    let config = DevicePairingConfig2 {
+        scopes: vec![],
+        runtime_scope: Some(DevicePairingRuntimeScope2 {
+            persistence_backend_id: "pairing-state".into(),
+            legacy_device_backend_id: Some("c".repeat(32)),
+            allowed_origins: vec![Origin::Operator],
+        }),
+        max_pairings: 32,
+        max_pending: 8,
+        max_pending_ttl_ms: 30_000,
+        max_session_ttl_ms: 3_600_000,
+        max_state_bytes: 65_536,
+        callback_timeout_ms: 1_000,
+    };
+    let one_scope = one_scope_config(&config, &catalog, SCOPE_ID)?;
+    assert_eq!(one_scope.scopes, vec![scope]);
+    assert_eq!(one_scope.runtime_scope, config.runtime_scope);
+    assert_eq!(one_scope.max_pairings, config.max_pairings);
+    Ok(())
+}
+
+#[test]
+fn legacy_callback_consumption_locks_and_records_the_one_shot_handle() {
+    let consumed = Mutex::new(std::collections::BTreeSet::new());
+    assert!(consume_legacy_import(&consumed, SCOPE_ID, "callback-handle").is_ok());
+    assert!(consume_legacy_import(&consumed, SCOPE_ID, "callback-handle").is_err());
+}
+
+#[tokio::test]
+async fn legacy_host_callback_consumes_its_handle_before_dispatch() -> TestResult {
+    use tinybus::{Connection, broker::Broker, transport::memory::MemoryBus};
+    use tinysecurity_bus::{
+        DevicePairingConfig2, DevicePairingContextResponse2, DevicePairingRuntimeScope2,
+        DevicePairingScope2, DevicePairingSource2, Origin,
+    };
+
+    let bus = MemoryBus::new();
+    let owner = Broker::new();
+    let broker = owner.spawn(bus.clone());
+    let connection = Connection::connect(bus.connect().await?).await?;
+    let peer = connection.unique_name().ok_or("fixture peer")?;
+    let scope = DevicePairingScope2 {
+        scope_id: SCOPE_ID.into(),
+        secret_registration_id: "b".repeat(32),
+        persistence_backend_id: "pairing-state".into(),
+        legacy_device_backend_id: Some("c".repeat(32)),
+        legacy_source_registration_id: Some("b".repeat(32)),
+    };
+    let callbacks = HostCallbacks {
+        connection,
+        peer,
+        config: DevicePairingConfig2 {
+            scopes: vec![],
+            runtime_scope: Some(DevicePairingRuntimeScope2 {
+                persistence_backend_id: "pairing-state".into(),
+                legacy_device_backend_id: Some("c".repeat(32)),
+                allowed_origins: vec![Origin::Operator],
+            }),
+            max_pairings: 32,
+            max_pending: 8,
+            max_pending_ttl_ms: 30_000,
+            max_session_ttl_ms: 3_600_000,
+            max_state_bytes: 65_536,
+            callback_timeout_ms: 1_000,
+        },
+        scope_catalog: Arc::new(RwLock::new([(SCOPE_ID.into(), scope.clone())].into())),
+        consumed_legacy_imports: Mutex::new(BTreeSet::new()),
+    };
+    assert_eq!(callbacks.scope(SCOPE_ID)?, scope);
+    let context = DevicePairingContextResponse2 {
+        scope_id: SCOPE_ID.into(),
+        user_binding: "opaque-user-binding".into(),
+        secret_master_handle: None,
+        legacy_import_handle: Some("callback-handle".into()),
+        channel_id: String::new(),
+        pairing_token: None,
+        connection_nonce: String::new(),
+        generation: 1,
+        source: DevicePairingSource2::AuthenticatedUserController,
+        expires_at_ms: 2_000,
+    };
+    assert!(
+        callbacks
+            .load_legacy(SCOPE_ID, "callback-handle", &context)
+            .await
+            .is_err()
+    );
+    assert!(
+        callbacks
+            .load_legacy(SCOPE_ID, "callback-handle", &context)
+            .await
+            .is_err()
+    );
+    let consumed = callbacks
+        .consumed_legacy_imports
+        .lock()
+        .map_err(|_| "legacy import lock poisoned")?;
+    assert_eq!(consumed.len(), 1);
+    broker.abort();
+    Ok(())
+}
+
 fn registry_with_frame()
 -> Result<Arc<tinysecurity::crypto::device_handles::Registry>, Box<dyn std::error::Error>> {
     use tinysecurity::crypto::{
@@ -166,6 +629,7 @@ fn owner() -> Result<DevicePairingOwner, Box<dyn std::error::Error>> {
             legacy_device_backend_id: None,
             legacy_source_registration_id: None,
         }],
+        runtime_scope: None,
         max_pairings: 1,
         max_pending: 1,
         max_pending_ttl_ms: 1_000,
@@ -195,6 +659,7 @@ fn controller(channel: &str) -> tinysecurity_bus::DevicePairingContextResponse2 
         secret_master_handle: None,
         legacy_import_handle: None,
         channel_id: channel.into(),
+        pairing_token: (!channel.is_empty()).then(|| "fixture-pairing-token".into()),
         connection_nonce: "pairing-test-nonce".into(),
         generation: 1,
         source: tinysecurity_bus::DevicePairingSource2::AuthenticatedUserController,

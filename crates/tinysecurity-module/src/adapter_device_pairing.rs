@@ -3,9 +3,9 @@
 use super::Arc;
 use std::sync::OnceLock;
 use std::{
-    collections::BTreeMap,
-    sync::Mutex,
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{Mutex, RwLock},
 };
 use tinysecurity::crypto::{
     device_handles::{PairedTunnelRegistration, Registry},
@@ -17,12 +17,32 @@ use tinysecurity_bus::{
     DevicePairingLegacyFormat2, DevicePairingLegacyLoadRequest2, DevicePairingLegacyLoadResponse2,
     DevicePairingOperation2, DevicePairingPersistenceOperation2, DevicePairingPersistenceRequest2,
     DevicePairingPersistenceResponse2, DevicePairingPurpose2, DevicePairingRequest2,
-    DevicePairingResponse2, callback_names2,
+    DevicePairingResponse2, DevicePairingRuntimeScope2, MasterPurpose2, MasterSlotKind2,
+    SecretRegistration2, callback_names2,
 };
 use zeroize::{Zeroize, Zeroizing};
 
 fn denied() -> tinybus::Error {
     tinybus::Error::failed("device pairing authority denied")
+}
+const MAX_LEGACY_IMPORT_HANDLES: usize = 4096;
+fn consume_legacy_import_handle(
+    consumed: &mut BTreeSet<(String, String)>,
+    scope_id: &str,
+    handle: &str,
+    limit: usize,
+) -> tinybus::Result<()> {
+    if scope_id.len() != 32
+        || !scope_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || handle.is_empty()
+        || handle.len() > 256
+        || handle.chars().any(char::is_control)
+        || consumed.len() >= limit
+        || !consumed.insert((scope_id.to_owned(), handle.to_owned()))
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 fn validate_logout_context(
     context: &DevicePairingContextResponse2,
@@ -61,6 +81,172 @@ fn unlock_scope_lookup<T>(
 }
 fn valid_persistence_backend_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
+}
+fn lookup_scope(
+    catalog: &RwLock<BTreeMap<String, tinysecurity_bus::DevicePairingScope2>>,
+    scope_id: &str,
+) -> tinybus::Result<tinysecurity_bus::DevicePairingScope2> {
+    catalog
+        .read()
+        .map_err(|_| denied())?
+        .get(scope_id)
+        .cloned()
+        .ok_or_else(denied)
+}
+fn consume_legacy_import(
+    consumed: &Mutex<BTreeSet<(String, String)>>,
+    scope_id: &str,
+    handle: &str,
+) -> tinybus::Result<()> {
+    let mut consumed = consumed.lock().map_err(|_| denied())?;
+    consume_legacy_import_handle(&mut consumed, scope_id, handle, MAX_LEGACY_IMPORT_HANDLES)
+}
+fn one_scope_config(
+    config: &DevicePairingConfig2,
+    catalog: &RwLock<BTreeMap<String, tinysecurity_bus::DevicePairingScope2>>,
+    scope_id: &str,
+) -> tinybus::Result<DevicePairingConfig2> {
+    let mut config = config.clone();
+    config.scopes = vec![lookup_scope(catalog, scope_id)?];
+    Ok(config)
+}
+fn validate_runtime_approval_snapshot(
+    approval: &tinysecurity_bus::ApprovalScope2,
+    generation: u64,
+) -> tinybus::Result<()> {
+    if approval.generation != generation || !approval.require_approval || approval.auto_approve_all
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+fn validate_secret_scope_binding(
+    approval: &tinysecurity_bus::ApprovalScope2,
+    selected: &tinysecurity_bus::ApprovalScope2,
+    verified: &tinysecurity_bus::ApprovalScope2,
+) -> tinybus::Result<()> {
+    if selected != approval || verified != approval {
+        return Err(denied());
+    }
+    Ok(())
+}
+fn validate_runtime_defaults(defaults: &DevicePairingRuntimeScope2) -> tinybus::Result<()> {
+    if !valid_persistence_backend_id(&defaults.persistence_backend_id)
+        || defaults.allowed_origins.is_empty()
+        || defaults.allowed_origins.len() > 8
+        || defaults
+            .legacy_device_backend_id
+            .as_ref()
+            .is_some_and(|id| id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || defaults
+            .allowed_origins
+            .iter()
+            .enumerate()
+            .any(|(index, origin)| defaults.allowed_origins[..index].contains(origin))
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+fn derive_runtime_scope(
+    approval: &tinysecurity_bus::ApprovalScope2,
+    secret: &SecretRegistration2,
+    defaults: &DevicePairingRuntimeScope2,
+) -> tinybus::Result<(
+    tinysecurity_bus::DevicePairingScope2,
+    tinysecurity_bus::Origin,
+)> {
+    if approval.scope_id.len() != 32
+        || !approval
+            .scope_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || approval.generation == 0
+        || !approval.require_approval
+        || approval.auto_approve_all
+        || secret.approval_scope_id != approval.scope_id
+        || secret.purpose != MasterPurpose2::ConfigUserMaster
+        || secret.target.slot != MasterSlotKind2::User
+        || secret.registration_id.len() != 32
+        || !secret
+            .registration_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !defaults.allowed_origins.contains(&secret.origin)
+        || !valid_persistence_backend_id(&defaults.persistence_backend_id)
+        || defaults
+            .legacy_device_backend_id
+            .as_ref()
+            .is_some_and(|id| id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(denied());
+    }
+    let scope = tinysecurity_bus::DevicePairingScope2 {
+        scope_id: approval.scope_id.clone(),
+        secret_registration_id: secret.registration_id.clone(),
+        persistence_backend_id: defaults.persistence_backend_id.clone(),
+        legacy_device_backend_id: defaults.legacy_device_backend_id.clone(),
+        legacy_source_registration_id: defaults
+            .legacy_device_backend_id
+            .as_ref()
+            .map(|_| secret.registration_id.clone()),
+    };
+    Ok((scope, secret.origin.clone()))
+}
+#[allow(clippy::too_many_arguments)] // Both registries are updated under the caller's lock pair.
+fn admit_runtime_scope(
+    scope: tinysecurity_bus::DevicePairingScope2,
+    approval: tinysecurity_bus::ApprovalScope2,
+    origin: tinysecurity_bus::Origin,
+    registry: &Registry,
+    generation: u64,
+    now: tinysecurity::crypto::device_handles::Time,
+    epochs: &mut BTreeMap<String, u64>,
+    catalog: &mut BTreeMap<String, tinysecurity_bus::DevicePairingScope2>,
+) -> tinybus::Result<tinysecurity_bus::DevicePairingScopeReceipt2> {
+    if scope.scope_id != approval.scope_id
+        || approval.generation != generation
+        || scope.secret_registration_id.len() != 32
+        || !scope
+            .secret_registration_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !valid_persistence_backend_id(&scope.persistence_backend_id)
+        || scope.legacy_device_backend_id.is_some() != scope.legacy_source_registration_id.is_some()
+        || scope
+            .legacy_source_registration_id
+            .as_deref()
+            .is_some_and(|id| id != scope.secret_registration_id)
+    {
+        return Err(denied());
+    }
+    if let Some(existing) = catalog.get(&scope.scope_id) {
+        if existing != &scope || !epochs.contains_key(&scope.scope_id) {
+            return Err(denied());
+        }
+        registry
+            .register_scope(approval, origin, generation, now)
+            .map_err(|_| denied())?;
+        return Ok(tinysecurity_bus::DevicePairingScopeReceipt2 {
+            scope_id: scope.scope_id,
+            active: true,
+        });
+    }
+    if catalog.len() >= 128 || epochs.contains_key(&scope.scope_id) {
+        return Err(denied());
+    }
+    // Native admission is the only fallible mutation. The two host-owned maps
+    // are already locked by the caller and insertion cannot fail afterward.
+    registry
+        .register_scope(approval, origin, generation, now)
+        .map_err(|_| denied())?;
+    let scope_id = scope.scope_id.clone();
+    catalog.insert(scope_id.clone(), scope);
+    epochs.insert(scope_id.clone(), 0);
+    Ok(tinysecurity_bus::DevicePairingScopeReceipt2 {
+        scope_id,
+        active: true,
+    })
 }
 fn check_persistence_fault(
     owner: &mut DevicePairingOwner,
@@ -194,14 +380,12 @@ struct HostCallbacks {
     connection: tinybus::Connection,
     peer: tinybus::BusName,
     config: DevicePairingConfig2,
+    scope_catalog: Arc<RwLock<BTreeMap<String, tinysecurity_bus::DevicePairingScope2>>>,
+    consumed_legacy_imports: Mutex<BTreeSet<(String, String)>>,
 }
 impl HostCallbacks {
-    fn scope(&self, scope_id: &str) -> tinybus::Result<&tinysecurity_bus::DevicePairingScope2> {
-        self.config
-            .scopes
-            .iter()
-            .find(|scope| scope.scope_id == scope_id)
-            .ok_or_else(denied)
+    fn scope(&self, scope_id: &str) -> tinybus::Result<tinysecurity_bus::DevicePairingScope2> {
+        lookup_scope(&self.scope_catalog, scope_id)
     }
     async fn resolve(
         &self,
@@ -288,6 +472,7 @@ impl HostCallbacks {
         if handle.is_empty() || handle.len() > 256 {
             return Err(denied());
         }
+        consume_legacy_import(&self.consumed_legacy_imports, scope_id, handle)?;
         let request = DevicePairingLegacyLoadRequest2 {
             handle: handle.into(),
         };
@@ -556,6 +741,7 @@ pub(super) struct PairingState {
     clock: Arc<dyn tinysecurity::approval::Clock>,
     generation: AtomicU64,
     scopes: LoadedScopes,
+    scope_catalog: Arc<RwLock<BTreeMap<String, tinysecurity_bus::DevicePairingScope2>>>,
 }
 impl std::fmt::Debug for PairingState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -597,10 +783,41 @@ impl PairingState {
             context,
         )
     }
-    fn one_scope_config(&self, scope_id: &str) -> tinybus::Result<DevicePairingConfig2> {
-        let mut config = self.config.clone();
-        config.scopes = vec![self.callbacks.scope(scope_id)?.clone()];
-        Ok(config)
+    /// Bind one live approval scope to pairing using init-fixed authority defaults.
+    pub(super) fn register_scope(
+        &self,
+        request: &tinysecurity_bus::RegisterDevicePairingScopeRequest2,
+        approvals: &tinysecurity::approval::Engine,
+    ) -> tinybus::Result<tinysecurity_bus::DevicePairingScopeReceipt2> {
+        let approval = approvals
+            .scope_snapshot(&request.approval_scope_id)
+            .map_err(|_| denied())?;
+        let generation = self.generation.load(Ordering::Acquire);
+        validate_runtime_approval_snapshot(&approval, generation)?;
+        let defaults = self.config.runtime_scope.as_ref().ok_or_else(denied)?;
+        let (secret_registration, secret_scope) =
+            self.secret.config_master_for_scope(&approval.scope_id)?;
+        let verified_secret_scope = self
+            .secret
+            .cipher_scope(&secret_registration.registration_id)?;
+        validate_secret_scope_binding(&approval, &secret_scope, &verified_secret_scope)?;
+        let (scope, origin) = derive_runtime_scope(&approval, &secret_registration, defaults)?;
+        let now = time(self.clock.as_ref())?;
+        let mut scopes = self.scopes.lock().map_err(|_| denied())?;
+        let mut catalog = self.scope_catalog.write().map_err(|_| denied())?;
+        admit_runtime_scope(
+            scope,
+            approval,
+            origin,
+            &self.registry,
+            generation,
+            tinysecurity::crypto::device_handles::Time {
+                wall: now.wall,
+                monotonic: now.monotonic,
+            },
+            &mut scopes.epochs,
+            &mut catalog,
+        )
     }
     async fn unlock_scope(
         &self,
@@ -644,9 +861,9 @@ impl PairingState {
         }) {
             return Err(denied());
         }
-        let one_scope = self.one_scope_config(&scope.scope_id)?;
+        let one_scope = one_scope_config(&self.config, &self.scope_catalog, &scope.scope_id)?;
         let owner = if let Some(ciphertext) = loaded.ciphertext.as_deref() {
-            let state = decode_state(&cipher, ciphertext, scope)?;
+            let state = decode_state(&cipher, ciphertext, &scope)?;
             DevicePairingOwner::restore(one_scope, generation, time(self.clock.as_ref())?, &state)
                 .map_err(|_| denied())?
         } else {
@@ -661,7 +878,7 @@ impl PairingState {
             .map_err(|_| denied())?;
             let revision = store_state(
                 &self.callbacks,
-                scope,
+                &scope,
                 &owner,
                 &cipher,
                 &loaded.revision,
@@ -1127,7 +1344,7 @@ impl PairingState {
         )?;
         loaded
             .owner
-            .merge_durable_state(&plaintext, &context, time(self.clock.as_ref())?)
+            .merge_recovered_durable_state(&plaintext, &context, time(self.clock.as_ref())?)
             .map_err(|_| denied())?;
         // The merge is now committed to the in-memory owner. Keep the CAS token
         // in sync even when channel recovery or final context validation fails.
@@ -1451,6 +1668,7 @@ impl PairingState {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Init-time policy validation and registry construction stay together.
 pub(super) fn configured(
     config: Option<DevicePairingConfig2>,
     connection: &tinybus::Connection,
@@ -1472,7 +1690,7 @@ pub(super) fn configured(
     config
         .map(|config| {
             if generation == 0
-                || config.scopes.is_empty()
+                || (config.scopes.is_empty() && config.runtime_scope.is_none())
                 || config.scopes.len() > 128
                 || !(1..=4096).contains(&config.max_pairings)
                 || !(1..=128).contains(&config.max_pending)
@@ -1482,6 +1700,9 @@ pub(super) fn configured(
                 || !(1..=30_000).contains(&config.callback_timeout_ms)
             {
                 return Err(denied());
+            }
+            if let Some(runtime) = &config.runtime_scope {
+                validate_runtime_defaults(runtime)?;
             }
             let peer = peer.ok_or_else(denied)?.parse::<tinybus::BusName>()?;
             if !peer.is_unique() {
@@ -1532,11 +1753,20 @@ pub(super) fn configured(
                 .iter()
                 .map(|scope| (scope.scope_id.clone(), 0))
                 .collect();
+            let scope_catalog = Arc::new(RwLock::new(
+                config
+                    .scopes
+                    .iter()
+                    .map(|scope| (scope.scope_id.clone(), scope.clone()))
+                    .collect(),
+            ));
             Ok(Arc::new(PairingState {
                 callbacks: HostCallbacks {
                     connection: connection.clone(),
                     peer,
                     config: config.clone(),
+                    scope_catalog: Arc::clone(&scope_catalog),
+                    consumed_legacy_imports: Mutex::new(BTreeSet::new()),
                 },
                 config,
                 secret,
@@ -1547,6 +1777,7 @@ pub(super) fn configured(
                     epochs,
                     loaded: BTreeMap::new(),
                 }),
+                scope_catalog,
             }))
         })
         .transpose()
@@ -1570,6 +1801,18 @@ pub(super) async fn invoke(
 ) -> tinybus::Result<DevicePairingResponse2> {
     let state = PAIRING.get().and_then(Option::as_ref).ok_or_else(denied)?;
     state.execute(request).await
+}
+
+/// Register one dynamically admitted scope against canonical approval state.
+pub(super) fn register_scope(
+    request: &tinysecurity_bus::RegisterDevicePairingScopeRequest2,
+    approvals: &tinysecurity::approval::Engine,
+) -> tinybus::Result<tinysecurity_bus::DevicePairingScopeReceipt2> {
+    PAIRING
+        .get()
+        .and_then(Option::as_ref)
+        .ok_or_else(denied)?
+        .register_scope(request, approvals)
 }
 
 #[cfg(test)]

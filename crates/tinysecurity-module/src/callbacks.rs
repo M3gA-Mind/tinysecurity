@@ -121,6 +121,8 @@ pub(crate) struct AuditClient {
     native: Option<std::sync::Arc<tinysecurity::audit::JsonlSink>>,
     /// The stream each host-recorded subject is bound to (`RecordAudit2`).
     pins: crate::stream_pins::StreamPins,
+    #[cfg(test)]
+    pub(crate) test_ordinary_calls: bool,
 }
 impl std::fmt::Debug for AuditClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -177,7 +179,22 @@ impl AuditClient {
             redactor: std::sync::RwLock::new(redactor),
             native,
             pins: crate::stream_pins::StreamPins::default(),
+            #[cfg(test)]
+            test_ordinary_calls: false,
         })
+    }
+    /// Use ordinary mock-bus callbacks in unit tests without confidential module
+    /// provenance. Production clients always use confidential callback calls.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        connection: tinybus::Connection,
+        binding: PeerBinding,
+        config: tinysecurity_bus::AuditConfig2,
+        redactor: tinysecurity::Redactor,
+    ) -> Result<Self> {
+        let mut client = Self::new(connection, binding, config, redactor)?;
+        client.test_ordinary_calls = true;
+        Ok(client)
     }
     /// Append one host-recorded event to `request.subject`'s stream (`RecordAudit2`).
     ///
@@ -210,12 +227,21 @@ impl AuditClient {
         config.stream_id = request.stream_id.clone();
         // Subjects other than the init one always forward to the host sink.
         config.native_path = None;
-        let Ok(client) = Self::new(
+        #[cfg(test)]
+        let client = Self::new_for_test(
             self.connection.clone(),
             self.binding.clone(),
             config,
             redactor.clone(),
-        ) else {
+        );
+        #[cfg(not(test))]
+        let client = Self::new(
+            self.connection.clone(),
+            self.binding.clone(),
+            config,
+            redactor.clone(),
+        );
+        let Ok(client) = client else {
             return denied();
         };
         let Some(sequence) = request.audit.expected_tail.checked_add(1) else {
@@ -270,7 +296,11 @@ impl AuditClient {
         batch: tinysecurity_bus::AuditSinkRequest2,
         registry: Result<tinysecurity::Redactor>,
     ) -> tinysecurity_bus::AuditResponse2 {
-        self.append_mode(batch, registry, false).await
+        #[cfg(test)]
+        let confidential = !self.test_ordinary_calls;
+        #[cfg(not(test))]
+        let confidential = true;
+        self.append_mode(batch, registry, confidential).await
     }
     pub(crate) async fn append_native_with_registry(
         &self,
@@ -379,21 +409,9 @@ async fn await_native_worker(
         worker,
     )
     .await
-    .map_err(|_| {
-        #[cfg(test)]
-        eprintln!("audit-worker-stage=1 deadline=1");
-        tinybus::Error::failed("audit worker deadline exceeded")
-    })?
-    .map_err(|_| {
-        #[cfg(test)]
-        eprintln!("audit-worker-stage=2 unavailable=1");
-        tinybus::Error::failed("audit worker unavailable")
-    })?
-    .map_err(|_| {
-        #[cfg(test)]
-        eprintln!("audit-worker-stage=3 storage=1");
-        tinybus::Error::failed("audit storage unavailable")
-    })
+    .map_err(|_| tinybus::Error::failed("audit worker deadline exceeded"))?
+    .map_err(|_| tinybus::Error::failed("audit worker unavailable"))?
+    .map_err(|_| tinybus::Error::failed("audit storage unavailable"))
 }
 #[cfg(test)]
 #[path = "callbacks_tests.rs"]

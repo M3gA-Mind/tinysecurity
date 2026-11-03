@@ -406,6 +406,9 @@
   "KeyringConsentResponse": {
     "allowed": false
   },
+  "KeyringConsentResponse2": {
+    "outcome": "consent_denied"
+  },
   "CallerContext": {
     "agent": "fixture",
     "thread": "fixture",

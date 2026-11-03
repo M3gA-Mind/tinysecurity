@@ -8,8 +8,9 @@ use std::sync::{
 use tinybus::{BusName, CallContext, Connection, Interface, InterfaceName, MemberName};
 use tinysecurity_bus::{
     ApprovalCasRequest2, ApprovalChoice2, ApprovalDeliveryRequest2, ApprovalDeliveryResponse2,
-    ApprovalLifecycle2, ApprovalLoadRequest2, ApprovalRow2, DecideRequest2, SubjectScope,
-    VerifyHumanRequest2, callback_names2, names,
+    ApprovalLifecycle2, ApprovalLoadRequest2, ApprovalPurgeSessionRequest2,
+    ApprovalPurgeSessionResponse2, ApprovalRow2, DecideRequest2, SubjectScope, VerifyHumanRequest2,
+    callback_names2, names,
 };
 #[derive(Clone)]
 pub(crate) struct Callback {
@@ -27,14 +28,18 @@ impl Interface for Callback {
         self.interface.clone()
     }
     fn members(&self) -> Vec<MemberName> {
-        let names = if self.interface.as_str() == callback_names2::APPROVAL_STORE {
-            [callback_names2::LOAD, callback_names2::CAS]
+        let names: &[&str] = if self.interface.as_str() == callback_names2::APPROVAL_STORE {
+            &[
+                callback_names2::LOAD,
+                callback_names2::CAS,
+                callback_names2::PURGE_SESSION,
+            ]
         } else {
-            [callback_names2::PROMPT, callback_names2::VERIFY_HUMAN]
+            &[callback_names2::PROMPT, callback_names2::VERIFY_HUMAN]
         };
         names
-            .into_iter()
-            .filter_map(|name| name.parse().ok())
+            .iter()
+            .filter_map(|name| (*name).parse().ok())
             .collect()
     }
 
@@ -75,6 +80,16 @@ impl Interface for Callback {
                         .map_err(|_| tinybus::Error::failed("fixture state unavailable"))?
                         .cas(request)?,
                 )
+                .map_err(Into::into)
+            }
+            callback_names2::PURGE_SESSION => {
+                let (request,): (ApprovalPurgeSessionRequest2,) = serde_json::from_value(args)?;
+                self.scope(&request.scope)?;
+                serde_json::to_value(ApprovalPurgeSessionResponse2 {
+                    scope: request.scope,
+                    session_id: request.session_id,
+                    removed: 0,
+                })
                 .map_err(Into::into)
             }
             callback_names2::VERIFY_HUMAN => {

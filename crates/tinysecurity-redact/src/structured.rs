@@ -56,6 +56,25 @@ const CONTENT_KEYS: &[&str] = &[
     "public_url",
     "signed_url",
     "presigned_url",
+    // Query names commonly used as bearer-capability parts of S3, GCS and
+    // Azure signed URLs. These are sensitive even when callers split a URL
+    // into a structured argument map.
+    "x_amz_algorithm",
+    "x_amz_credential",
+    "x_amz_date",
+    "x_amz_expires",
+    "x_amz_security_token",
+    "x_amz_signature",
+    "x_amz_signedheaders",
+    "x_goog_algorithm",
+    "x_goog_credential",
+    "x_goog_date",
+    "x_goog_expires",
+    "x_goog_signature",
+    "x_goog_signedheaders",
+    "signature",
+    "sig",
+    "sas_token",
 ];
 /// Matches after lowercasing and dropping `-`/`_`, so `X-Api-Key`, `api_key` and
 /// `apiKey` are one key. Exact match only: `cancellation_token` is not a credential.
@@ -90,6 +109,23 @@ fn credential_key(key: &str) -> bool {
             | "cookie"
             | "setcookie"
     )
+}
+fn content_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    CONTENT_KEYS.iter().any(|candidate| {
+        candidate
+            .chars()
+            .filter(|c| !matches!(c, '-' | '_'))
+            .map(|c| c.to_ascii_lowercase())
+            .eq(normalized.chars())
+    })
+}
+pub(crate) fn sensitive_json_key(key: &str) -> bool {
+    credential_key(key) || content_key(key)
 }
 fn marker(text: &str) -> bool {
     if text == MARKER {
@@ -195,10 +231,8 @@ impl Redactor {
                 let mut out = Map::new();
                 let mut counters = std::collections::BTreeMap::new();
                 for (key, value) in map {
-                    let lower = key.to_ascii_lowercase();
-                    let sensitive = credential_key(&lower)
-                        || (*mode == RedactMode::StructuredArguments
-                            && CONTENT_KEYS.contains(&lower.as_str()));
+                    let sensitive = credential_key(key)
+                        || (*mode == RedactMode::StructuredArguments && content_key(key));
                     let value = if sensitive {
                         if *mode == RedactMode::StructuredArguments {
                             let counted = count_marker(value);

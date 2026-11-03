@@ -2,6 +2,8 @@
 mod privacy;
 mod privacy_check;
 pub use privacy_check::privacy_verdict;
+mod local_provider;
+pub use local_provider::classify_provider_endpoint;
 mod registry;
 mod resolver;
 mod url_guard;

@@ -12,7 +12,15 @@ A later authenticated TinyBus sender contract will enforce that channel boundary
 additionally supports an explicit host-local service capability. That capability
 is an exact loopback IP origin, path and independently constructed host metadata
 category; it never grants a generic agent URL access to private addresses.
-`LocalOnly` blocks nonlocal requests before DNS. Standard requires a declared
+`LocalOnly` blocks nonlocal requests before DNS. Hosts classify configured
+provider endpoint hosts through `ClassifyProviderEndpoint2`: only loopback,
+unspecified and `localhost` names are on-device. RFC 1918/LAN, link-local and
+IPv6 unique-local hosts are external because they can name another device; no
+DNS lookup is used to classify names. If classification fails, treat the
+endpoint as external. See the
+[contract 1.32 specification](specs/local-provider-endpoint-1.32.md).
+`Sensitive` denies unassessed external user content; it allows only assessed
+`none`/`low` user content with no identifying categories. Standard requires a declared
 endpoint and data category. Sensitive additionally refuses credentials,
 identifiers, unknown classification and original payloads, URLs or headers the
 shared redactor changes. The descriptor is the registered policy's

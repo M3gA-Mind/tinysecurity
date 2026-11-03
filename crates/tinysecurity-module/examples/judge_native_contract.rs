@@ -1,6 +1,6 @@
 //! Loaded native Jev scoring against a literal-loopback mock and durable callbacks.
-#[path = "approval_native_contract/callback.rs"]
-mod callback;
+#[path = "approval_native_contract/bound_callback.rs"]
+mod bound_callback;
 #[path = "approval_native_contract/namespace.rs"]
 mod namespace;
 #[path = "approval_native_contract/store.rs"]
@@ -9,19 +9,144 @@ mod store;
 mod stub;
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tinybus::{Connection, broker::Broker, module::ModuleHost, transport::memory::MemoryBus};
+use tinybus::{
+    Connection,
+    broker::Broker,
+    module::{HostCallbackEndpoint, HostCallbackProxy, ModuleHost},
+    transport::memory::MemoryBus,
+};
 use tinysecurity_bus::{
     AccessTier, ApprovalActionRequest2, ApprovalChoice2, ApprovalConfig2, ApprovalLifecycle2,
-    ApprovalRow2, ApprovalScope2, AuditConfig2, AuditCorrelation2, CallerContext, Check,
-    DecideRequest2, EvaluateApprovalRequest2, EvaluateApprovalResponse2, EvaluateRequest,
-    JudgeConfig, JudgeOutcome2, JudgeProvider, ModuleConfig, Origin, PolicyInfo, RedactorConfig,
-    Secret, SubjectScope, ToolCall, Verdict, callback_names2, names,
+    ApprovalRow2, ApprovalScope2, AuditConfig2, AuditCorrelation2, AuditEventReceipt2,
+    AuditSinkRequest2, AuditSinkResponse2, CallerContext, Check, DecideRequest2,
+    EvaluateApprovalRequest2, EvaluateApprovalResponse2, EvaluateRequest, JudgeConfig,
+    JudgeOutcome2, JudgeProvider, ModuleConfig, Origin, PolicyInfo, RedactorConfig, Secret,
+    SubjectScope, ToolCall, Verdict, callback_names2, names,
 };
+#[derive(Clone)]
+struct Sink;
+#[tinybus::interface(name = "ai.tinyhumans.tinysecurity.AuditSink2")]
+impl Sink {
+    async fn append(&self, request: AuditSinkRequest2) -> tinybus::Result<AuditSinkResponse2> {
+        std::future::ready(Ok(AuditSinkResponse2 {
+            scope: request.scope,
+            stream_id: request.stream_id,
+            new_tail: request.events[0].sequence,
+            events: request
+                .events
+                .into_iter()
+                .map(|event| AuditEventReceipt2 {
+                    event_id: event.event_id,
+                    sequence: event.sequence,
+                })
+                .collect(),
+        }))
+        .await
+    }
+}
+
+async fn load_bound_module(
+    lifecycle: &ModuleHost,
+    library: &std::path::Path,
+    host: &Connection,
+    mut configuration: ModuleConfig,
+    store: Arc<Mutex<store::DiskStore>>,
+    prompt_failure: Arc<AtomicBool>,
+) -> Result<
+    (
+        tinybus::module::HostCallbackBinding,
+        HostCallbackProxy,
+        String,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let path: tinybus::ObjectPath = callback_names2::OBJECT_PATH.parse()?;
+    let endpoint = |interface: &str, members: &[&str]| -> tinybus::Result<HostCallbackEndpoint> {
+        Ok(HostCallbackEndpoint {
+            path: path.clone(),
+            interface: interface.parse()?,
+            members: members
+                .iter()
+                .map(|member| (*member).parse())
+                .collect::<tinybus::Result<_>>()?,
+        })
+    };
+    let binding = lifecycle
+        .prepare_host_callbacks(vec![
+            endpoint(
+                callback_names2::APPROVAL_STORE,
+                &[callback_names2::LOAD, callback_names2::CAS],
+            )?,
+            endpoint(
+                callback_names2::APPROVAL_PROMPT,
+                &[callback_names2::PROMPT, callback_names2::VERIFY_HUMAN],
+            )?,
+            endpoint(callback_names2::AUDIT_SINK, &[callback_names2::APPEND])?,
+        ])
+        .await?;
+    configuration.trusted_host = Some(binding.unique_name().to_string());
+    let guard = binding.guard();
+    let module_proxy = Arc::new(OnceLock::new());
+    let scope = tinysecurity::approval::scope_handle(
+        &configuration
+            .approvals
+            .as_ref()
+            .ok_or("approval config")?
+            .scopes[0]
+            .subject,
+    )?;
+    for interface in [
+        callback_names2::APPROVAL_STORE,
+        callback_names2::APPROVAL_PROMPT,
+    ] {
+        binding
+            .serve_at(
+                path.clone(),
+                bound_callback::Callback {
+                    guard: guard.clone(),
+                    module_proxy: module_proxy.clone(),
+                    interface: interface.parse()?,
+                    scope: scope.clone(),
+                    store: store.clone(),
+                    reentrant: Arc::new(AtomicBool::new(false)),
+                    prompt_failure: prompt_failure.clone(),
+                },
+            )
+            .await?;
+    }
+    binding.serve_at(path, Sink).await?;
+    let loaded = lifecycle
+        .load_file_with_host_callbacks(library, serde_json::to_value(configuration)?, &binding)
+        .await?;
+    let module = module_peer(host).await?;
+    let proxy = binding
+        .proxy(module.as_str(), names::OBJECT_PATH, names::INTERFACE)?
+        .with_timeout(Duration::from_secs(10));
+    module_proxy
+        .set(proxy.clone())
+        .map_err(|_| "fixture module proxy already initialized")?;
+    assert!(proxy.attestation().await?.is_some());
+    Ok((binding, proxy, loaded.name))
+}
+
+async fn module_peer(client: &Connection) -> tinybus::Result<tinybus::BusName> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(peer) = client.name_owner(names::INTERFACE).await? {
+                return Ok(peer);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| tinybus::Error::failed("native approval initialization unavailable"))?
+}
+
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 fn audit(sequence: u64) -> AuditCorrelation2 {
     AuditCorrelation2 {
@@ -82,40 +207,31 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         workspace: "workspace".into(),
         agent: "agent".into(),
     };
-    let scope = tinysecurity::approval::scope_handle(&subject)?;
     let mut configuration = configuration(&host, &root, subject)?;
-    let loaded =
-        lifecycle.load_file_with_config(&library, serde_json::to_value(&configuration)?)?;
-    let module = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(peer) = host.name_owner(names::INTERFACE).await? {
-                return tinybus::Result::Ok(peer);
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await??;
+    configuration.judge = Some(judge(stub.endpoint.clone()));
     let store = Arc::new(Mutex::new(store::DiskStore::open(
         &root.join("approvals.journal"),
     )?));
     let prompt_failure = Arc::new(AtomicBool::new(false));
-    serve_callbacks(&host, &module, &scope, &store, &prompt_failure).await?;
-    let proxy = host
-        .proxy(module.as_str(), names::OBJECT_PATH, names::INTERFACE)?
-        .with_timeout(Duration::from_secs(10));
+    let (_binding, proxy, loaded_name) = load_bound_module(
+        &lifecycle,
+        &library,
+        &host,
+        configuration.clone(),
+        store.clone(),
+        prompt_failure.clone(),
+    )
+    .await?;
+    let mut non_opted = begin(1, 1);
+    non_opted.request.caller.origin = Origin::Copilot;
     let off: EvaluateApprovalResponse2 = proxy
-        .call(names::methods::EVALUATE_APPROVAL2, (begin(1, 1),))
+        .call(names::methods::EVALUATE_APPROVAL2, (non_opted,))
         .await?;
     assert!(matches!(
         off.decision.verdict,
         Verdict::RequireApproval { .. }
     ));
     assert!(stub.requests.lock().map_err(|_| "stub")?.is_empty());
-    configuration.judge = Some(judge(stub.endpoint.clone()));
-    lifecycle
-        .reinitialize(&loaded.name, serde_json::to_value(&configuration)?)
-        .await?;
-    GENERATION.store(2, Ordering::SeqCst);
     verify_scoring(&proxy, &stub).await?;
     verify_fallback(&proxy, &stub, &store).await?;
     verify_matrix(&proxy, &stub).await?;
@@ -124,12 +240,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     invalid.judge.as_mut().ok_or("judge")?.credential = Secret("invalid-candidate-key".into());
     assert!(
         lifecycle
-            .reinitialize(&loaded.name, serde_json::to_value(invalid)?)
+            .reinitialize(&loaded_name, serde_json::to_value(invalid)?)
             .await
             .is_err()
     );
     let info: PolicyInfo = proxy.call(names::methods::POLICY_INFO, ()).await?;
-    assert_eq!(info.generation, 2);
+    assert_eq!(info.generation, 1);
     verify_info(&info, &stub)?;
     verify_retained_scoring(&proxy, &stub).await?;
     prompt_failure.store(true, Ordering::SeqCst);
@@ -182,7 +298,7 @@ fn verify_info(
 }
 
 async fn verify_retained_scoring(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     stub: &stub::Stub,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     *stub.response.lock().map_err(|_| "stub")? = (200, stub::response([1.0, 1.0, 0.0]));
@@ -241,7 +357,7 @@ async fn verify_retained_scoring(
 
 /// Low confidence, malformed and timed-out (SDK reports both as unavailable) replies, and `SaaS` all reach a human, never Allow.
 async fn verify_matrix(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     stub: &stub::Stub,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cases = [
@@ -343,7 +459,7 @@ fn configuration(
 }
 
 async fn verify_scoring(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     stub: &stub::Stub,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let qualified: EvaluateApprovalResponse2 = proxy
@@ -398,7 +514,7 @@ async fn verify_scoring(
 }
 
 async fn verify_fallback(
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     stub: &stub::Stub,
     store: &Mutex<store::DiskStore>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -466,33 +582,4 @@ fn admit_library() -> std::result::Result<std::path::PathBuf, Box<dyn std::error
         ),
     )?;
     Ok(library)
-}
-
-async fn serve_callbacks(
-    host: &Connection,
-    module: &tinybus::BusName,
-    scope: &SubjectScope,
-    store: &Arc<Mutex<store::DiskStore>>,
-    prompt_failure: &Arc<AtomicBool>,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let reentrant = Arc::new(AtomicBool::new(false));
-    for interface in [
-        callback_names2::APPROVAL_STORE,
-        callback_names2::APPROVAL_PROMPT,
-    ] {
-        host.serve_at(
-            callback_names2::OBJECT_PATH.parse()?,
-            callback::Callback {
-                module: module.clone(),
-                host: host.clone(),
-                interface: interface.parse()?,
-                scope: scope.clone(),
-                store: store.clone(),
-                reentrant: reentrant.clone(),
-                prompt_failure: prompt_failure.clone(),
-            },
-        )
-        .await?;
-    }
-    Ok(())
 }

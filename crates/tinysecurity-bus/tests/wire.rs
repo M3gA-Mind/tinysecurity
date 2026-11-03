@@ -62,6 +62,7 @@ golden!(AuditSinkRequest, roundtrip_audit_sink_request);
 golden!(AuditSinkResponse, roundtrip_audit_sink_response);
 golden!(KeyringConsentRequest, roundtrip_keyring_consent_request);
 golden!(KeyringConsentResponse, roundtrip_keyring_consent_response);
+golden!(KeyringConsentResponse2, roundtrip_keyring_consent_response2);
 golden!(CallerContext, roundtrip_caller_context);
 golden!(ToolCall, roundtrip_tool_call);
 golden!(EvaluateRequest, roundtrip_evaluate_request);

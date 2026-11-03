@@ -12,13 +12,16 @@ prose while removing known token formats (OpenAI/Anthropic, GitHub, AWS access
 keys, Slack, Stripe, Google API, npm, GitLab, JWT, PEM private keys), credential
 assignments (including `Authorization` with its `Bearer`/`Basic`/`Digest`
 scheme and whole `Cookie`/`Set-Cookie` lists), email,
-validated identifiers, URL capabilities and native home prefixes. Cards need
-both an issuer prefix and Luhn validation; IBANs need mod-97 validation. These
+validated identifiers, URL capabilities and native home prefixes. Card numbers
+need a valid Luhn checksum plus an issued IIN/length or a nearby card keyword;
+this leaves timestamp-like digit runs intact. IBANs need mod-97 validation. These
 local patterns reduce accidental disclosure and do not detect every identifier
 or establish that arbitrary text is safe for publication.
 
-Structured arguments use approval count/type markers for sensitive content
-keys; structured log arguments redact credential keys without hiding ordinary
+Structured arguments use approval count/type markers for the host's sensitive
+content keys (58 entries in the current OpenHuman approval table), including
+presigned URL fields; embedded string values still pass through secret-pattern
+redaction. Structured log arguments redact credential keys without hiding ordinary
 content. Credential keys compare after lowercasing and dropping `-` and `_`
 (`X-Api-Key`, `api_key` and `apiKey` are one key) and by exact name only, so
 `cancellation_token` stays ordinary content. Both scan unknown fields, keys and embedded JSON. Key collisions retain

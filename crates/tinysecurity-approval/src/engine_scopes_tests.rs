@@ -1,4 +1,5 @@
 use super::*;
+use tinysecurity_bus::GrantToolRequest2;
 
 const STREAM: &str = "5555555555555555555555555555555a";
 
@@ -363,9 +364,8 @@ async fn tool_grant_approves_only_that_tool_with_a_persisted_audited_row() -> Re
     let row = owner
         .begin(begin_for(7, "shell", None, Origin::Operator))
         .await?;
-    assert_eq!(row.state, ApprovalLifecycle2::Approved);
-    assert_eq!(row.attribution.as_deref(), Some("auto:tool-grant"));
-    assert_eq!(row.choice, Some(ApprovalChoice2::Once));
+    assert_eq!(row.state, ApprovalLifecycle2::Pending);
+    assert_eq!(row.attribution, None);
     assert!(row.decision_ticket_sha256.is_none());
     assert!(
         fixture
@@ -376,20 +376,13 @@ async fn tool_grant_approves_only_that_tool_with_a_persisted_audited_row() -> Re
             .any(|a| a.request_id == row.request_id),
         "a granted row is audited"
     );
-    // The row survives a restart: the same call resolves to it and reserves once.
+    // A configured allowlist cannot shortcut the required human decision.
     assert_eq!(
         owner
             .begin(begin_for(7, "shell", None, Origin::Operator))
             .await?
             .request_id,
         row.request_id
-    );
-    let mut act = action(&row, 3);
-    act.scope_id = id(7);
-    act.request = begin_for(7, "shell", None, Origin::Operator).request;
-    assert_eq!(
-        owner.consume(act).await?.state,
-        ApprovalLifecycle2::Reserved
     );
     let other = owner
         .begin(begin_for(7, "http_request", None, Origin::Operator))
@@ -407,8 +400,8 @@ async fn flow_grant_is_scoped_to_that_flow_and_tool() -> Result<()> {
     let granted = owner
         .begin(begin_for(7, "shell", Some("flow-1"), Origin::Operator))
         .await?;
-    assert_eq!(granted.state, ApprovalLifecycle2::Approved);
-    assert_eq!(granted.attribution.as_deref(), Some("auto:flow-grant"));
+    assert_eq!(granted.state, ApprovalLifecycle2::Pending);
+    assert_eq!(granted.attribution, None);
     for (tool, flow) in [
         ("shell", Some("flow-2")),
         ("shell", None),
@@ -432,7 +425,7 @@ async fn grants_reach_saas_but_never_override_cron_external_denial_or_human_only
     let saas = owner
         .begin(begin_for(7, "shell", None, Origin::Saas))
         .await?;
-    assert_eq!(saas.state, ApprovalLifecycle2::Approved);
+    assert_eq!(saas.state, ApprovalLifecycle2::Pending);
     let mut cron = begin_for(7, "shell", None, Origin::Cron);
     cron.request.call.checks = vec![Check::Command {
         command: "x".into(),
@@ -808,7 +801,7 @@ async fn revoking_a_grant_blocks_consumption_of_its_unconsumed_approval() -> Res
     owner.register_scope(req).await?;
     let call = begin_for(7, "shell", None, Origin::Operator);
     let row = owner.begin(call.clone()).await?;
-    assert_eq!(row.state, ApprovalLifecycle2::Approved);
+    assert_eq!(row.state, ApprovalLifecycle2::Pending);
     // The grant is removed before the approved row is consumed.
     owner.replace_scope(register(7)).await?;
     let mut act = action(&row, 3);
@@ -838,10 +831,10 @@ async fn grant_revoked_while_the_ports_await_never_publishes_an_approval() -> Re
     owner.replace_scope(register(7)).await?;
     fixture.release_load.notify_one();
     assert_eq!(
-        racing.await.map_err(|_| Error::Unavailable)?.err(),
-        Some(Error::Denied)
+        racing.await.map_err(|_| Error::Unavailable)??.state,
+        ApprovalLifecycle2::Pending
     );
-    // Asking again under the replaced scope needs a human.
+    // The configured allowlist never bypasses the human decision.
     let again = owner
         .begin(begin_for(7, "shell", None, Origin::Operator))
         .await?;
@@ -963,13 +956,18 @@ async fn policy_replaced_while_consume_awaits_never_reserves_the_old_approval() 
 async fn scope_replacement_waits_for_a_trusted_reservation_to_commit() -> Result<()> {
     let (fixture, owner) = owner()?;
     let owner = Arc::new(owner);
-    let mut req = register(7);
-    req.grants = grants(&["shell"], &[]);
-    owner.register_scope(req).await?;
+    owner.register_scope(register(7)).await?;
+    owner
+        .grant_tool(GrantToolRequest2 {
+            scope_id: id(7),
+            tool: "shell".into(),
+            audit: audit(1),
+        })
+        .await?;
     let call = begin_for(7, "shell", None, Origin::Operator);
     let row = owner.begin(call.clone()).await?;
     assert_eq!(row.state, ApprovalLifecycle2::Approved);
-    // The grant disappears after the checks but before the write commits.
+    // The trusted grant disappears after checks but before the write commits.
     let before = fixture.cas_calls.load(Ordering::SeqCst);
     fixture
         .barrier
@@ -990,7 +988,11 @@ async fn scope_replacement_waits_for_a_trusted_reservation_to_commit() -> Result
     }
     let replacing = tokio::spawn({
         let owner = owner.clone();
-        async move { owner.replace_scope(register(7)).await }
+        async move {
+            let mut next = register(7);
+            next.scope.policy_ref = "replacement-policy".into();
+            owner.replace_scope(next).await
+        }
     });
     tokio::task::yield_now().await;
     assert!(!replacing.is_finished());
@@ -1060,7 +1062,7 @@ async fn grant_revoked_while_the_approval_is_published_is_not_returned() -> Resu
                 .await
         }
     });
-    // The new row's write is parked: the grant is revoked after the early checks.
+    // The new row's write is parked while the configured allowlist is replaced.
     while fixture.cas_calls.load(Ordering::SeqCst) == before {
         tokio::task::yield_now().await;
     }
@@ -1073,8 +1075,8 @@ async fn grant_revoked_while_the_approval_is_published_is_not_returned() -> Resu
         .ok_or(Error::Unavailable)?;
     barrier.wait().await;
     assert_eq!(
-        racing.await.map_err(|_| Error::Unavailable)?.err(),
-        Some(Error::Denied)
+        racing.await.map_err(|_| Error::Unavailable)??.state,
+        ApprovalLifecycle2::Pending
     );
     Ok(())
 }

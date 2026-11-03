@@ -39,6 +39,12 @@ the module remains the single owner of every other redaction surface.
    display, audit, egress privacy checks and prompts call the module and deny
    their effect when it is unavailable.
 
+The exception includes synchronous Sentry `before_send` and pre-module
+request logging. Those hooks must scrub without awaiting module startup or
+making a bus call, so they keep the fixed floor until the admitted redactor is
+ready. Their early-boot use does not authorize the floor for ordinary product
+surfaces or permit logging the original payload on refusal.
+
 ## Consequences
 
 Boot diagnostics survive a missing module, with weaker coverage than the module

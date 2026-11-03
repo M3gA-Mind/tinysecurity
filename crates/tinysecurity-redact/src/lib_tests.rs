@@ -62,6 +62,58 @@ fn debug_and_bounds_are_content_free() -> Result<()> {
 }
 
 #[test]
+fn json_sanitization_drops_sensitive_keys_and_reports_changes() -> Result<()> {
+    let registry = Redactor::new(&RedactorConfig::default())?;
+    let input = serde_json::json!({
+        "label": "safe title",
+        "api_key": "secret-value",
+        "nested": {"password": "private", "count": 4},
+    });
+    let sanitized = registry.sanitize_json(&input)?;
+    assert_eq!(
+        sanitized.value,
+        serde_json::json!({"label":"safe title","nested":{"count":4}})
+    );
+    assert_eq!(sanitized.report.key_redactions, 2);
+    assert!(sanitized.report.changed());
+    let unchanged = registry.sanitize_json(&serde_json::json!({"count": 4}))?;
+    assert!(!unchanged.report.changed());
+    Ok(())
+}
+
+#[test]
+fn json_sanitization_reports_text_pii_private_keys_arrays_and_depth() -> Result<()> {
+    let registry = Redactor::new(&RedactorConfig::default())?;
+    let input = serde_json::json!([
+        {"safe": "email private@example.com"},
+        {"safe": "address 192.0.2.1"},
+        {"safe": format!("-----BEGIN {kind}-----{body}-----END {kind}-----", kind = "PRIVATE KEY", body = "\nprivate\n")}
+    ]);
+    let sanitized = registry.sanitize_json(&input)?;
+    assert_eq!(sanitized.value[0]["safe"], format!("email {MARKER}"));
+    assert_eq!(sanitized.value[1]["safe"], format!("address {MARKER}"));
+    assert_eq!(sanitized.value[2]["safe"], MARKER);
+    assert_eq!(sanitized.report.text_redactions, 3);
+    assert_eq!(sanitized.report.pii_redactions, 1);
+    assert_eq!(sanitized.report.blocked_secret_hits, 1);
+
+    let mut boundary = serde_json::Value::Null;
+    for _ in 0..MAX_DEPTH {
+        boundary = serde_json::Value::Array(vec![boundary]);
+    }
+    let at_limit = registry.sanitize_json(&boundary)?;
+    assert_eq!(at_limit.report.depth_redactions, 0);
+    assert!(!at_limit.report.changed());
+
+    // The root is depth zero: one more array visits its leaf at MAX_DEPTH + 1.
+    let beyond_limit = serde_json::Value::Array(vec![boundary]);
+    let deep = registry.sanitize_json(&beyond_limit)?;
+    assert_eq!(deep.report.depth_redactions, 1);
+    assert!(deep.report.changed());
+    Ok(())
+}
+
+#[test]
 fn direct_credential_transfers_block_prompts() -> Result<()> {
     let registry = Redactor::new(&RedactorConfig::default())?;
     let scans = [

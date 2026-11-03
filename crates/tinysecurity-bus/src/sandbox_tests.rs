@@ -284,6 +284,7 @@ fn diagnostic_operation(
         limits: ResourceLimits2::default(),
         deny_subprocesses: true,
         accept_process_isolation: false,
+        credential_denials: vec![],
         options: SandboxPlanOptions2::default(),
         generation: 1,
         ttl_ms: 1,
@@ -305,6 +306,7 @@ fn diagnostic_operation(
         capability_id: "private".into(),
         backend: SandboxBackend::Docker,
         grants: vec![],
+        deny_read: vec![],
         network: NetworkPolicy::Host,
         proxy_id: Some("private".into()),
         limits: ResourceLimits2::default(),
@@ -339,15 +341,26 @@ fn minimal_request() -> std::result::Result<serde_json::Value, Box<dyn std::erro
 }
 
 #[test]
-fn a_request_without_options_keeps_the_1_21_wire_shape()
+fn a_request_without_new_folder_fields_keeps_the_1_30_wire_shape()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let value = minimal_request()?;
     assert!(value.get("options").is_none(), "{value}");
+    assert!(value.get("credential_denials").is_none(), "{value}");
     let mut with_unknown = value.clone();
     with_unknown["options"] = serde_json::json!({"unknown": true});
     assert!(serde_json::from_value::<SandboxPlanRequest2>(with_unknown).is_err());
     let back: SandboxPlanRequest2 = serde_json::from_value(value).required()?;
     assert!(back.options.is_default());
+    assert_eq!(back.credential_denials, Vec::<std::path::PathBuf>::new());
+
+    let mut with_credentials = serde_json::to_value(&back).required()?;
+    with_credentials["credential_denials"] = serde_json::json!(["/home/user/.app/credentials"]);
+    let back: SandboxPlanRequest2 = serde_json::from_value(with_credentials.clone()).required()?;
+    assert_eq!(
+        back.credential_denials,
+        [std::path::PathBuf::from("/home/user/.app/credentials")]
+    );
+    assert_eq!(serde_json::to_value(back).required()?, with_credentials);
     Ok(())
 }
 
@@ -385,11 +398,14 @@ fn an_artifact_marks_a_host_run_and_a_workspace_less_plan_only_when_set()
     let (_, mut artifact) = private_pair();
     let value = serde_json::to_value(&artifact).required()?;
     assert!(value.get("host_run").is_none() && value.get("no_workspace").is_none());
+    assert!(value.get("deny_read").is_none());
     artifact.host_run = true;
     artifact.no_workspace = true;
+    artifact.deny_read = vec!["/home/user/.ssh".into()];
     let value = serde_json::to_value(&artifact).required()?;
     assert_eq!(value["host_run"], true);
     assert_eq!(value["no_workspace"], true);
+    assert_eq!(value["deny_read"], serde_json::json!(["/home/user/.ssh"]));
     let back: SandboxArtifact2 = serde_json::from_value(value).required()?;
     assert!(back.host_run && back.no_workspace);
     Ok(())

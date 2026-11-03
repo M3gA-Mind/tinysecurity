@@ -3,25 +3,40 @@
 //! A tenant is registered after init with its own audit stream. The host serves the
 //! store, prompt and audit callbacks for that tenant only, so every success below
 //! went through the runtime scope rather than the init scope.
+#[path = "approval_native_contract/bound_callback.rs"]
+mod bound_callback;
 #[path = "approval_native_contract/store.rs"]
 mod store;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, atomic::AtomicBool},
     time::Duration,
 };
-use tinybus::{Connection, broker::Broker, module::ModuleHost, transport::memory::MemoryBus};
+use tinybus::{
+    Connection,
+    broker::Broker,
+    module::{HostCallbackEndpoint, HostCallbackProxy, ModuleHost},
+    transport::memory::MemoryBus,
+};
 use tinysecurity_bus::{
-    AccessTier, ApprovalCasRequest2, ApprovalCasResponse2, ApprovalChoice2, ApprovalConfig2,
-    ApprovalDeliveryRequest2, ApprovalDeliveryResponse2, ApprovalGrants2, ApprovalLifecycle2,
-    ApprovalLoadRequest2, ApprovalLoadResponse2, ApprovalRow2, ApprovalScope2,
-    ApprovalScopeOutcome2, ApprovalScopeReceipt2, AuditConfig2, AuditCorrelation2,
-    AuditEventReceipt2, AuditSinkRequest2, AuditSinkResponse2, CallerContext, Check,
-    DecideRequest2, EvaluateApprovalRequest2, EvaluateApprovalResponse2, EvaluateRequest,
-    HumanDecisionReceipt2, ModuleConfig, RegisterApprovalScopeRequest2,
-    RetireApprovalScopeRequest2, SubjectScope, ToolCall, Verdict, VerifyHumanRequest2, names,
+    AccessTier, ApprovalChoice2, ApprovalConfig2, ApprovalGrants2, ApprovalLifecycle2,
+    ApprovalRow2, ApprovalScope2, ApprovalScopeOutcome2, ApprovalScopeReceipt2, AuditConfig2,
+    AuditCorrelation2, AuditEventReceipt2, AuditSinkRequest2, AuditSinkResponse2, CallerContext,
+    Check, DecideRequest2, EvaluateApprovalRequest2, EvaluateApprovalResponse2, EvaluateRequest,
+    ModuleConfig, Origin, RegisterApprovalScopeRequest2, RetireApprovalScopeRequest2, SubjectScope,
+    ToolCall, Verdict, callback_names2, names,
 };
 
 type Failure = Box<dyn std::error::Error>;
+
+fn locked<T>(
+    store: &Arc<Mutex<store::DiskStore>>,
+    f: impl FnOnce(&mut store::DiskStore) -> tinybus::Result<T>,
+) -> tinybus::Result<T> {
+    let mut store = store
+        .lock()
+        .map_err(|_| tinybus::Error::failed("native approval store unavailable"))?;
+    f(&mut store)
+}
 
 const TENANT: &str = "7777777777777777777777777777777b";
 const STREAM: &str = "8888888888888888888888888888888c";
@@ -41,7 +56,7 @@ fn registration(grants: ApprovalGrants2) -> RegisterApprovalScopeRequest2 {
             policy_ref: "tenant-policy".into(),
             generation: 1,
             ceiling: AccessTier::Full,
-            require_approval: true,
+            require_approval: false,
             auto_approve_all: false,
         },
         grants,
@@ -64,6 +79,7 @@ fn begin(instance: u64, sequence: u64, tool: &str) -> EvaluateApprovalRequest2 {
                 agent: "tenant-agent".into(),
                 call_id: format!("execution-{instance}"),
                 tier: AccessTier::Full,
+                origin: Origin::Saas,
                 ..Default::default()
             },
             call: ToolCall {
@@ -78,64 +94,6 @@ fn begin(instance: u64, sequence: u64, tool: &str) -> EvaluateApprovalRequest2 {
     }
 }
 
-/// Tenant-only store and prompt callbacks backed by the persistent fixture ledger.
-#[derive(Clone)]
-struct Host {
-    scope: SubjectScope,
-    store: Arc<Mutex<store::DiskStore>>,
-}
-fn locked<T>(
-    store: &Arc<Mutex<store::DiskStore>>,
-    work: impl FnOnce(&mut store::DiskStore) -> tinybus::Result<T>,
-) -> tinybus::Result<T> {
-    let mut guard = store
-        .lock()
-        .map_err(|_| tinybus::Error::failed("fixture state unavailable"))?;
-    work(&mut guard)
-}
-#[tinybus::interface(name = "ai.tinyhumans.tinysecurity.ApprovalStore2")]
-impl Host {
-    async fn load(&self, request: ApprovalLoadRequest2) -> tinybus::Result<ApprovalLoadResponse2> {
-        if request.scope != self.scope {
-            return Err(tinybus::Error::failed("fixture wrong scope"));
-        }
-        std::future::ready(locked(&self.store, |s| s.load(&request))).await
-    }
-    async fn cas(&self, request: ApprovalCasRequest2) -> tinybus::Result<ApprovalCasResponse2> {
-        if request.scope != self.scope {
-            return Err(tinybus::Error::failed("fixture wrong scope"));
-        }
-        std::future::ready(locked(&self.store, |s| s.cas(request))).await
-    }
-}
-#[derive(Clone)]
-struct Prompt(Host);
-#[tinybus::interface(name = "ai.tinyhumans.tinysecurity.ApprovalPrompt2")]
-impl Prompt {
-    async fn prompt(
-        &self,
-        request: ApprovalDeliveryRequest2,
-    ) -> tinybus::Result<ApprovalDeliveryResponse2> {
-        if request.row.binding.scope != self.0.scope {
-            return Err(tinybus::Error::failed("fixture wrong scope"));
-        }
-        std::future::ready(Ok(ApprovalDeliveryResponse2 {
-            request_id: request.row.request_id,
-            nonce: request.row.nonce,
-            delivered: true,
-        }))
-        .await
-    }
-    async fn verify_human(
-        &self,
-        request: VerifyHumanRequest2,
-    ) -> tinybus::Result<HumanDecisionReceipt2> {
-        if request.row.binding.scope != self.0.scope {
-            return Err(tinybus::Error::failed("fixture wrong scope"));
-        }
-        std::future::ready(locked(&self.0.store, |s| s.human(&request))).await
-    }
-}
 #[derive(Clone)]
 struct Sink;
 #[tinybus::interface(name = "ai.tinyhumans.tinysecurity.AuditSink2")]
@@ -169,6 +127,82 @@ async fn module_peer(client: &Connection) -> tinybus::Result<tinybus::BusName> {
     })
     .await
     .map_err(|_| tinybus::Error::failed("native approval initialization unavailable"))?
+}
+
+async fn bind_and_load(
+    lifecycle: &ModuleHost,
+    library: &std::path::Path,
+    client: &Connection,
+    mut configuration: ModuleConfig,
+    store: Arc<Mutex<store::DiskStore>>,
+) -> std::result::Result<
+    (
+        tinybus::module::HostCallbackBinding,
+        tinybus::BusName,
+        HostCallbackProxy,
+    ),
+    Failure,
+> {
+    let callback_path: tinybus::ObjectPath = callback_names2::OBJECT_PATH.parse()?;
+    let endpoint = |interface: &str, members: &[&str]| -> tinybus::Result<HostCallbackEndpoint> {
+        Ok(HostCallbackEndpoint {
+            path: callback_path.clone(),
+            interface: interface.parse()?,
+            members: members
+                .iter()
+                .map(|member| (*member).parse())
+                .collect::<tinybus::Result<_>>()?,
+        })
+    };
+    let binding = lifecycle
+        .prepare_host_callbacks(vec![
+            endpoint(
+                callback_names2::APPROVAL_STORE,
+                &[callback_names2::LOAD, callback_names2::CAS],
+            )?,
+            endpoint(
+                callback_names2::APPROVAL_PROMPT,
+                &[callback_names2::PROMPT, callback_names2::VERIFY_HUMAN],
+            )?,
+            endpoint(callback_names2::AUDIT_SINK, &[callback_names2::APPEND])?,
+        ])
+        .await?;
+    configuration.trusted_host = Some(binding.unique_name().to_string());
+    let guard = binding.guard();
+    let module_proxy = Arc::new(OnceLock::new());
+    let scope = tinysecurity::approval::scope_handle(&subject("tenant-agent"))?;
+    for interface in [
+        callback_names2::APPROVAL_STORE,
+        callback_names2::APPROVAL_PROMPT,
+    ] {
+        binding
+            .serve_at(
+                callback_path.clone(),
+                bound_callback::Callback {
+                    guard: guard.clone(),
+                    module_proxy: module_proxy.clone(),
+                    interface: interface.parse()?,
+                    scope: scope.clone(),
+                    store: store.clone(),
+                    reentrant: Arc::new(AtomicBool::new(false)),
+                    prompt_failure: Arc::new(AtomicBool::new(false)),
+                },
+            )
+            .await?;
+    }
+    binding.serve_at(callback_path, Sink).await?;
+    lifecycle
+        .load_file_with_host_callbacks(library, serde_json::to_value(configuration)?, &binding)
+        .await?;
+    let module = module_peer(client).await?;
+    let proxy = binding
+        .proxy(module.as_str(), names::OBJECT_PATH, names::INTERFACE)?
+        .with_timeout(Duration::from_secs(10));
+    module_proxy
+        .set(proxy.clone())
+        .map_err(|_| "fixture module proxy already initialized")?;
+    assert!(proxy.attestation().await?.is_some());
+    Ok((binding, module, proxy))
 }
 
 #[tokio::main]
@@ -212,7 +246,7 @@ async fn main() -> std::result::Result<(), Failure> {
         auto_approve_all: false,
     };
     let configuration = ModuleConfig {
-        trusted_host: client.unique_name().map(|n| n.as_str().to_owned()),
+        trusted_host: None,
         approvals: Some(ApprovalConfig2 {
             timeout_ms: 30_000,
             scopes: vec![operator.clone()],
@@ -230,35 +264,9 @@ async fn main() -> std::result::Result<(), Failure> {
         }),
         ..Default::default()
     };
-    lifecycle.load_file_with_config(&library, serde_json::to_value(configuration)?)?;
-    let module = module_peer(&client).await?;
     let store = Arc::new(Mutex::new(store::DiskStore::open(&journal)?));
-    let host = Host {
-        scope: tinysecurity::approval::scope_handle(&subject("tenant-agent"))?,
-        store: store.clone(),
-    };
-    client
-        .serve_at(
-            tinysecurity_bus::callback_names2::OBJECT_PATH.parse()?,
-            host.clone(),
-        )
-        .await?;
-    client
-        .serve_at(
-            tinysecurity_bus::callback_names2::OBJECT_PATH.parse()?,
-            Prompt(host),
-        )
-        .await?;
-    client
-        .serve_at(
-            tinysecurity_bus::callback_names2::OBJECT_PATH.parse()?,
-            Sink,
-        )
-        .await?;
-    let proxy = client
-        .proxy(module.as_str(), names::OBJECT_PATH, names::INTERFACE)?
-        .with_timeout(Duration::from_secs(10));
-    assert!(proxy.attestation().await?.is_some());
+    let (_binding, module, proxy) =
+        bind_and_load(&lifecycle, &library, &client, configuration, store.clone()).await?;
 
     scenario(&bus, &module, &proxy, &store).await?;
     assert!(!String::from_utf8_lossy(&std::fs::read(&journal)?).contains("private-secret"));
@@ -273,7 +281,7 @@ async fn main() -> std::result::Result<(), Failure> {
 async fn scenario(
     bus: &MemoryBus,
     module: &tinybus::BusName,
-    proxy: &tinybus::Proxy,
+    proxy: &HostCallbackProxy,
     store: &Arc<Mutex<store::DiskStore>>,
 ) -> std::result::Result<(), Failure> {
     let grants = || ApprovalGrants2 {
@@ -353,7 +361,7 @@ async fn scenario(
     replace_then_retire(proxy).await
 }
 
-async fn replace_then_retire(proxy: &tinybus::Proxy) -> std::result::Result<(), Failure> {
+async fn replace_then_retire(proxy: &HostCallbackProxy) -> std::result::Result<(), Failure> {
     let replaced: ApprovalScopeReceipt2 = proxy
         .call(
             names::methods::REPLACE_APPROVAL_SCOPE2,

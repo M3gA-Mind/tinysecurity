@@ -1,4 +1,54 @@
 use super::*;
+#[test]
+fn session_purge_contract_roundtrips_and_rejects_unrelated_responses()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let request = ApprovalPurgeSessionRequest2 {
+        scope: SubjectScope {
+            user: "user-hash".into(),
+            workspace: "workspace-hash".into(),
+            agent: "agent-hash".into(),
+        },
+        session_id: "session-hash".into(),
+    };
+    let encoded = serde_json::to_string(&request)?;
+    let decoded: ApprovalPurgeSessionRequest2 = serde_json::from_str(&encoded)?;
+    assert_eq!(decoded, request);
+    let response = ApprovalPurgeSessionResponse2 {
+        scope: request.scope.clone(),
+        session_id: request.session_id.clone(),
+        removed: 3,
+    };
+    assert_eq!(request.verify_response(&response), Ok(()));
+    let mut unrelated = response;
+    unrelated.session_id = "other-session".into();
+    assert_eq!(
+        request.verify_response(&unrelated),
+        Err(crate::Error::InvalidArguments)
+    );
+    Ok(())
+}
+
+#[test]
+fn session_purge_debug_redacts_the_session_identifier() {
+    let request = ApprovalPurgeSessionRequest2 {
+        scope: SubjectScope {
+            user: "user-hash".into(),
+            workspace: "workspace-hash".into(),
+            agent: "agent-hash".into(),
+        },
+        session_id: "private-session-hash".into(),
+    };
+    let response = ApprovalPurgeSessionResponse2 {
+        scope: request.scope.clone(),
+        session_id: request.session_id.clone(),
+        removed: 1,
+    };
+    let debug = format!("{request:?}{response:?}");
+    assert!(debug.contains("ApprovalPurgeSessionRequest2([REDACTED])"));
+    assert!(debug.contains("ApprovalPurgeSessionResponse2([REDACTED])"));
+    assert!(!debug.contains("private-session-hash"));
+}
+
 fn mutation() -> ApprovalCasRequest2 {
     ApprovalCasRequest2 {
         scope: SubjectScope {

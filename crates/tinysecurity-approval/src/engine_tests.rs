@@ -107,6 +107,33 @@ impl Ports for Fixture {
         };
         NativeAuditAcknowledgement::from_verified_sink(row, expected_scope, receipt)
     }
+    async fn purge_session(
+        &self,
+        request: tinysecurity_bus::ApprovalPurgeSessionRequest2,
+    ) -> Result<tinysecurity_bus::ApprovalPurgeSessionResponse2> {
+        let mut rows = self.rows.lock().map_err(|_| Error::Unavailable)?;
+        let remove = rows
+            .iter()
+            .filter_map(|(id, record)| {
+                serde_json::from_str::<ApprovalRow2>(&record.record_json)
+                    .ok()
+                    .filter(|row| {
+                        row.binding.scope == request.scope
+                            && row.session_id.as_deref() == Some(&request.session_id)
+                            && row.state == ApprovalLifecycle2::Pending
+                    })
+                    .map(|_| id.clone())
+            })
+            .collect::<Vec<_>>();
+        for id in &remove {
+            rows.remove(id);
+        }
+        Ok(tinysecurity_bus::ApprovalPurgeSessionResponse2 {
+            scope: request.scope,
+            session_id: request.session_id,
+            removed: u32::try_from(remove.len()).map_err(|_| Error::Invalid)?,
+        })
+    }
     async fn load(&self, r: ApprovalLoadRequest2) -> Result<ApprovalLoadResponse2> {
         if self.load_fail.load(Ordering::SeqCst) != 0 {
             return Err(Error::Unavailable);

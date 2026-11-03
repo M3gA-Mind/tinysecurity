@@ -80,6 +80,10 @@ fn new_members_are_advertised_and_named_by_contract_constants() {
         names::methods::CONSUME_BROWSER_DIAL,
         names::methods::VALIDATE_BROWSER_DIAL,
         names::methods::REGISTER_SECRET_SCOPE2,
+        names::methods::LIST_RECENT_DECISIONS2,
+        names::methods::PURGE_APPROVAL_SESSION2,
+        names::methods::RECORD_AUDIT_ERROR2,
+        names::methods::CLASSIFY_PROVIDER_ENDPOINT2,
     ] {
         assert!(names::METHODS.contains(&name), "{name}");
     }
@@ -92,6 +96,11 @@ fn incompatible_execution_outcome_requires_a_new_contract_major() {
     // A 2.0 host accepts compatible 2.x modules, but older 1.x hosts reject this module.
     assert!(is_compatible((2, 0)));
     assert!(is_compatible((2, 1)));
+    assert!(!is_compatible((1, 36)));
+    assert!(!is_compatible((1, 35)));
+    assert!(!is_compatible((1, 34)));
+    assert!(!is_compatible((1, 33)));
+    assert!(!is_compatible((1, 30)));
     assert!(!is_compatible((1, 29)));
     assert!(!is_compatible((1, 28)));
     assert!(!is_compatible((1, 27)));

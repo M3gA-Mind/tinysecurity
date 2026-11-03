@@ -1,6 +1,29 @@
 use super::*;
 use tinysecurity_bus::names;
 
+#[test]
+fn keyring_consent_outcomes_are_distinct_and_name_free() {
+    for (outcome, expected) in [
+        (
+            KeyringConsentOutcome2::ConsentPending,
+            "ai.tinyhumans.tinysecurity.Error.ConsentPending",
+        ),
+        (
+            KeyringConsentOutcome2::ConsentDenied,
+            "ai.tinyhumans.tinysecurity.Error.ConsentDenied",
+        ),
+        (
+            KeyringConsentOutcome2::Unavailable,
+            "ai.tinyhumans.tinysecurity.Error.Unavailable",
+        ),
+    ] {
+        let error = consent_error(outcome);
+        assert_eq!(error.wire_name(), expected);
+        assert_eq!(error.wire_message(), "keyring consent outcome");
+        assert!(!error.wire_message().contains("secret-name"));
+    }
+}
+
 fn initialization(connection: &tinybus::Connection, peer: &str) -> Initialization<'static> {
     // The connection outlives each test body; leak a clone for a 'static borrow.
     let leaked: &'static tinybus::Connection = Box::leak(Box::new(connection.clone()));
@@ -42,7 +65,11 @@ impl Consenter {
         assert!(!serde_json::to_string(&request)?.contains("private-value"));
         self.seen.lock().map_err(|_| denied())?.push(request);
         std::future::ready(Ok(KeyringConsentResponse2 {
-            allowed: self.allow.load(std::sync::atomic::Ordering::SeqCst),
+            outcome: if self.allow.load(std::sync::atomic::Ordering::SeqCst) {
+                KeyringConsentOutcome2::Allowed
+            } else {
+                KeyringConsentOutcome2::ConsentDenied
+            },
         }))
         .await
     }
@@ -288,8 +315,19 @@ async fn keyring_requires_consent_for_each_operation() -> Result<(), Box<dyn std
     consenter
         .allow
         .store(false, std::sync::atomic::Ordering::SeqCst);
+    let refusal = fixture
+        .service
+        .keyring_access(keyring_request(KeyringOperation2::Get {
+            name: name.into(),
+        }))
+        .await
+        .err()
+        .ok_or("expected refusal")?;
+    assert_eq!(
+        refusal.wire_name(),
+        "ai.tinyhumans.tinysecurity.Error.ConsentDenied"
+    );
     for operation in [
-        KeyringOperation2::Get { name: name.into() },
         KeyringOperation2::Set {
             name: name.into(),
             value: b"x".to_vec(),
@@ -589,7 +627,11 @@ async fn initialization_requires_a_unique_authenticated_peer_and_valid_backends(
     if let Some(keyring) = &mut config.keyring {
         keyring.backend = KeyringBackend2::SecretService;
     }
-    assert!(configure(Some(config), None, &init).is_err());
+    let secret_service = configure(Some(config), None, &init);
+    #[cfg(all(target_os = "linux", feature = "keyring-secret-service"))]
+    assert!(secret_service.is_ok());
+    #[cfg(not(all(target_os = "linux", feature = "keyring-secret-service")))]
+    assert!(secret_service.is_err());
     let mut relative = self::config(&dir);
     if let Some(keyring) = &mut relative.keyring {
         keyring.backend = KeyringBackend2::EncryptedFile {

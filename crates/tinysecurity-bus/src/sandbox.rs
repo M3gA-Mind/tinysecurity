@@ -220,12 +220,18 @@ pub struct SandboxPlanRequest2 {
     /// Require child-process denial.
     pub deny_subprocesses: bool,
     /// The command is an ordinary tool command of the scope's operator (contract 1.21),
-    /// so a process-level jail whose constraints are best effort (macOS Seatbelt) may run
-    /// it. Honoured only for a trusted host source outside `SaaS`; a plan for untrusted
-    /// code or mandatory isolation is refused when it sets this. Absent means the
-    /// executor must meet the kernel-isolation floor with exactly enforced constraints.
+    /// so a process-level jail whose constraints are best effort (such as macOS Seatbelt)
+    /// may provide trusted folder confinement. Honoured only for a trusted host source
+    /// outside `SaaS`; a plan for untrusted code or mandatory isolation is refused when it
+    /// sets this. Absent means the executor must meet the kernel-isolation floor with
+    /// exactly enforced constraints.
     #[serde(default)]
     pub accept_process_isolation: bool,
+    /// Additional credential files known to the trusted host. `TinySecurity` merges these
+    /// with native credential roots for an allow-default folder jail and returns the
+    /// canonical list in the artifact's `deny_read` field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_denials: Vec<std::path::PathBuf>,
     /// Executor preference, workspace-less and host-run options (contract 1.22). Absent
     /// means the module chooses the executor and the plan grants what is requested.
     #[serde(default, skip_serializing_if = "SandboxPlanOptions2::is_default")]
@@ -278,7 +284,8 @@ impl SandboxPlanOptions2 {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxArtifact2 {
-    /// Minimum verified isolation required at actual launch.
+    /// Minimum verified isolation required at launch. `Process` can represent trusted
+    /// folder confinement such as Seatbelt; it never represents a kernel-isolation floor.
     pub minimum_isolation: IsolationLevel2,
     /// Opaque module-issued identity; a public fingerprint never supplies permission.
     pub plan_id: String,
@@ -308,6 +315,10 @@ pub struct SandboxArtifact2 {
     pub backend: SandboxBackend,
     /// Canonical approved roots.
     pub grants: Vec<PathGrant>,
+    /// Canonical credential paths to exclude from an allow-default folder jail. Hosts
+    /// pass this list directly to `TinyBox` `NativeJailConfig::deny_read`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_read: Vec<std::path::PathBuf>,
     /// Exact admitted reach.
     pub network: NetworkPolicy,
     /// Bound exclusive mediation identity.

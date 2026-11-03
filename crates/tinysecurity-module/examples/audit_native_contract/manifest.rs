@@ -1,11 +1,14 @@
 //! Inventory regression against the hash-admitted, genuinely loaded artifact.
 use std::collections::BTreeSet;
-use tinybus::{Proxy, module::manifest::ModuleManifest, version::InterfaceVersion};
+use tinybus::{
+    module::{HostCallbackProxy, manifest::ModuleManifest},
+    version::InterfaceVersion,
+};
 use tinysecurity_bus::{PolicyInfo, callback_names2, names};
 
 pub(super) async fn verify(
     manifest: &ModuleManifest,
-    proxy: &Proxy,
+    proxy: &HostCallbackProxy,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let policy: PolicyInfo = proxy.call(names::methods::POLICY_INFO, ()).await?;
     let provided = manifest

@@ -135,6 +135,68 @@ fn process_level_jail_runs_an_operator_command_only_when_the_request_accepts_it(
 }
 
 #[test]
+fn trusted_folder_plan_carries_pre_admitted_grants_and_credential_denials() -> Res {
+    let (_dir, mut scope, mut request) = operator()?;
+    scope.executors = vec![seatbelt(IsolationLevel2::Process)];
+    request.accept_process_isolation = true;
+
+    let ssh = scope
+        .paths
+        .home_dir
+        .as_ref()
+        .ok_or("home missing")?
+        .join(".ssh");
+    std::fs::create_dir(&ssh)?;
+    let app_credential = scope.paths.workspace_dir.join("credential.json");
+    std::fs::write(&app_credential, "secret")?;
+    let mut wire_request = serde_json::to_value(&request)?;
+    wire_request["credential_denials"] = serde_json::json!([app_credential]);
+    let request: SandboxPlanRequest2 = serde_json::from_value(wire_request)?;
+
+    let artifact = engine(scope.clone())?
+        .plan(&request, 1, 100)?
+        .artifact
+        .ok_or("trusted folder plan was denied")?;
+
+    assert_eq!(artifact.minimum_isolation, IsolationLevel2::Process);
+    assert_eq!(artifact.grants.len(), 1);
+    assert!(std::path::Path::new(&artifact.grants[0].path).is_absolute());
+    let wire_artifact = serde_json::to_value(artifact)?;
+    let denied = wire_artifact["deny_read"]
+        .as_array()
+        .ok_or("folder plan did not return deny_read paths")?;
+    assert!(denied.contains(&serde_json::json!(app_credential)));
+    assert!(denied.contains(&serde_json::json!(ssh)));
+    Ok(())
+}
+
+#[test]
+fn credential_denial_paths_must_be_bounded_absolute_and_traversal_free() -> Res {
+    let (_dir, scope, mut request) = operator()?;
+    request.credential_denials = vec![std::path::PathBuf::from("relative/credential")];
+    assert_eq!(
+        engine(scope.clone())?.plan(&request, 1, 100)?.denial,
+        Some(SandboxDenial2::InvalidRequest)
+    );
+
+    request.credential_denials = vec![std::path::PathBuf::from("/tmp/../secret")];
+    assert_eq!(
+        engine(scope.clone())?.plan(&request, 1, 100)?.denial,
+        Some(SandboxDenial2::InvalidRequest)
+    );
+
+    request.credential_denials = vec![std::path::PathBuf::from(format!(
+        "/tmp/{}",
+        "x".repeat(4096)
+    ))];
+    assert_eq!(
+        engine(scope)?.plan(&request, 1, 100)?.denial,
+        Some(SandboxDenial2::InvalidRequest)
+    );
+    Ok(())
+}
+
+#[test]
 fn process_level_jail_never_runs_untrusted_or_saas_plans() -> Res {
     let (_dir, scope, mut request) = operator()?;
     request.accept_process_isolation = true;

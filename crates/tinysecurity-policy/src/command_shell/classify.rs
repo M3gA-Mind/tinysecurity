@@ -18,6 +18,7 @@ const READ_ONLY_BASES: &[&str] = &[
     "cat",
     "pwd",
     "echo",
+    "printf",
     "wc",
     "head",
     "tail",
@@ -202,6 +203,194 @@ const GIT_READ_VERBS: &[&str] = &[
     "help",
 ];
 
+const DANGEROUS_ENV_NAMES: &[&str] = &[
+    "BASH_ENV",
+    "BAT_PAGER",
+    "BROWSER",
+    "DYLD_FORCE_FLAT_NAMESPACE",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "EDITOR",
+    "ENV",
+    "GIT_EDITOR",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_EXTERNAL_FILTER",
+    "GIT_PAGER",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "IFS",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LESS",
+    "LESSCLOSE",
+    "LESSOPEN",
+    "MANOPT",
+    "MANPAGER",
+    "PAGER",
+    "PATH",
+    "PROMPT_COMMAND",
+    "PS1",
+    "PS2",
+    "PS3",
+    "PS4",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "SHELL",
+    "VISUAL",
+];
+
+fn shell_unquote(word: &str) -> String {
+    let (mut out, mut quote, mut escaped) = (String::with_capacity(word.len()), None, false);
+    for c in word.chars() {
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(open), _) if c == open => quote = None,
+            (Some('"') | None, '\\') => escaped = true,
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn shell_words(source: &str) -> Vec<&str> {
+    let (mut words, mut start, mut quote, mut escaped) = (Vec::new(), None, None, false);
+    for (index, c) in source.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (quote, c) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), _) => {}
+            (_, '\\') => escaped = true,
+            (None, '\'' | '"') => quote = Some(c),
+            (None, c) if c.is_whitespace() => {
+                if let Some(begin) = start.take() {
+                    words.push(&source[begin..index]);
+                }
+                continue;
+            }
+            (Some(_) | None, _) => {}
+        }
+        start.get_or_insert(index);
+    }
+    if let Some(begin) = start {
+        words.push(&source[begin..]);
+    }
+    words
+}
+
+fn launcher_value_options(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name {
+        "env" => &["-u", "--unset", "-C", "--chdir"],
+        "timeout" => &["-s", "--signal", "-k", "--kill-after"],
+        "nice" => &["-n", "--adjustment"],
+        "stdbuf" => &["-i", "-o", "-e"],
+        "xargs" => &["-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"],
+        "time" => &["-f", "-o"],
+        "exec" => &["-a"],
+        "nohup" | "command" => &[],
+        _ => return None,
+    })
+}
+
+fn effective_command<'a, 'w>(words: &'a [&'w str]) -> (String, &'a [&'w str]) {
+    let (mut name, mut args, mut rest) = (String::new(), &words[..0], words);
+    while let Some((first, tail)) = rest.split_first() {
+        if is_assignment(first) {
+            rest = tail;
+            continue;
+        }
+        name = super::scan::normalized_command_name(&shell_unquote(first));
+        args = tail;
+        let Some(options) = launcher_value_options(&name) else {
+            break;
+        };
+        let mut operand = 0;
+        while let Some(word) = tail.get(operand) {
+            if options.contains(word) {
+                operand += 2;
+            } else if word.starts_with('-') || is_assignment(word) {
+                operand += 1;
+            } else {
+                break;
+            }
+        }
+        if name == "timeout" {
+            operand += 1;
+        }
+        rest = tail.get(operand..).unwrap_or_default();
+    }
+    (name, args)
+}
+
+fn env_split_string(words: &[&str]) -> Option<String> {
+    let position = words
+        .iter()
+        .position(|word| !is_assignment(word))
+        .filter(|&i| super::scan::normalized_command_name(&shell_unquote(words[i])) == "env")?;
+    let mut rest = words[position + 1..].iter();
+    while let Some(word) = rest.next() {
+        let unquoted = shell_unquote(word);
+        let split = if unquoted == "-S" || unquoted == "--split-string" {
+            rest.next().map(|v| shell_unquote(v))
+        } else if let Some(value) = unquoted.strip_prefix("--split-string=") {
+            Some(value.to_owned())
+        } else if let Some(value) = unquoted.strip_prefix("-S") {
+            Some(value.to_owned())
+        } else if launcher_value_options("env").is_some_and(|options| options.contains(word)) {
+            rest.next();
+            continue;
+        } else if unquoted.starts_with('-') || is_assignment(word) {
+            continue;
+        } else {
+            return None;
+        };
+        return split
+            .map(|command| format!("{command} {}", rest.copied().collect::<Vec<_>>().join(" ")));
+    }
+    None
+}
+
+/// Classify the command actually launched by one shell segment, including env
+/// assignments, env split-string and standard command launchers.
+pub(crate) fn classify_segment_source(source: &str) -> CommandClass {
+    let words = shell_words(source);
+    if let Some(command) = env_split_string(&words) {
+        return classify_segment_source(&command).max(CommandClass::Write);
+    }
+    let (base, args) = effective_command(&words);
+    let args = args
+        .iter()
+        .map(|w| shell_unquote(w).to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let joined = source.replace(['\'', '"'], "").to_ascii_lowercase();
+    let mut class = classify_segment(&base, &args, &joined);
+    if words.iter().any(|word| {
+        is_assignment(word)
+            && word.split_once('=').is_some_and(|(name, _)| {
+                let upper = name.to_ascii_uppercase();
+                DANGEROUS_ENV_NAMES.contains(&upper.as_str()) || upper.starts_with("GIT_CONFIG")
+            })
+    }) {
+        class = class.max(CommandClass::Write);
+    }
+    class
+}
+
 /// npm/pnpm/yarn read-only subcommands. `install`/`run`/`test`/`exec` (which
 /// run arbitrary scripts) and unknown verbs are fail-closed to `Write`.
 const NODE_PKG_READ_VERBS: &[&str] = &[
@@ -310,6 +499,38 @@ pub(crate) fn classify_segment(base: &str, args: &[String], joined: &str) -> Com
         }
         return CommandClass::Read;
     }
+    if base == "git" {
+        let sub = args.get(1).map(String::as_str);
+        if matches!(args.first().map(String::as_str), Some("remote"))
+            && sub.is_some_and(|s| !matches!(s, "-v" | "--verbose" | "show" | "get-url"))
+            || matches!(args.first().map(String::as_str), Some("reflog"))
+                && matches!(sub, Some("expire" | "delete"))
+            || args
+                .iter()
+                .any(|a| a == "--config-env" || a.starts_with("--config-env=") || a == "--ext-diff")
+            || matches!(args.first().map(String::as_str), Some("diff" | "log"))
+                && args
+                    .iter()
+                    .any(|a| a == "--output" || a.starts_with("--output="))
+        {
+            return CommandClass::Write;
+        }
+    }
+    if matches!(base, "npm" | "pnpm" | "yarn")
+        && args.first().is_some_and(|a| a == "audit")
+        && args.iter().any(|a| a == "fix")
+    {
+        return CommandClass::Write;
+    }
+    if base == "rg" && args.iter().any(|a| a == "--pre" || a.starts_with("--pre="))
+        || base == "tree" && args.iter().any(|a| a == "-o")
+        || base == "hostname"
+            && args
+                .iter()
+                .any(|a| !a.starts_with('-') || a.starts_with("--file"))
+    {
+        return CommandClass::Write;
+    }
     // Verb-sensitive VCS / package tools.
     if base == "git" {
         return verb_class(args, GIT_READ_VERBS);
@@ -342,6 +563,9 @@ fn verb_class(args: &[String], read_verbs: &[&str]) -> CommandClass {
 /// past the approval summary, so these are refused outside Full (which is
 /// trusted to use redirects and pipes). Mirrors the structural checks in
 /// `SecurityPolicy::is_command_allowed`.
+/// `$()` and `${…}` are refused; simple `$NAME` expansion remains allowed.
+/// Bash `&>` is treated as an output redirect (classified `Write`), not as a
+/// background operator, and can run after the class gate is approved.
 /// Detect shell structure that can **hide execution** from `classify_command`,
 /// which only inspects the base command of each `;`/`&&`/`|` segment. Command
 /// and process substitution and backticks run an *inner* command classification
@@ -350,7 +574,7 @@ fn verb_class(args: &[String], read_verbs: &[&str]) -> CommandClass {
 /// stay hard-blocked outside Full.
 ///
 /// Deliberately NOT flagged here: plain redirects (`>`, `2>&1`, `2>/dev/null`),
-/// `tee`, and `${VAR}` expansion. `classify_command` already lifts a redirect /
+/// `&>` output redirection, and `tee`. `classify_command` already lifts a redirect /
 /// `tee` to `Write`, so the gate prompts and — once the human approves — the
 /// command MUST actually run. Re-blocking an approved `… 2>&1` here was the bug
 /// that made Supervised mode unusable: every command the agent wrote carried a
@@ -376,6 +600,7 @@ pub(crate) fn has_hidden_execution_lexical(command: &str) -> bool {
     // must still allow benign fd-dup redirects like `2>&1`.)
     command.contains('`')
         || command.contains("$(")
+        || command.contains("${")
         || command.contains("<(")
         || command.contains(">(")
         || contains_unquoted_background_ampersand(command)

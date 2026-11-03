@@ -305,7 +305,7 @@ async fn required_audit_refuses_an_unbound_admission_question() -> TestResult {
     let task = tinybus::broker::Broker::new().spawn(bus.clone());
     let host = Connection::connect(bus.connect().await?).await?;
     let module = Connection::connect(bus.connect().await?).await?;
-    let audit = crate::callbacks::AuditClient::new(
+    let audit = crate::callbacks::AuditClient::new_for_test(
         module,
         crate::callbacks::PeerBinding::new(
             host.unique_name().as_ref().map(tinybus::BusName::as_str),
@@ -408,7 +408,7 @@ async fn an_audited_spend_the_audit_gate_refuses_is_given_back() -> TestResult {
     let host = Connection::connect(bus.connect().await?).await?;
     let module = Connection::connect(bus.connect().await?).await?;
     let audit = |required| -> std::result::Result<_, Box<dyn std::error::Error>> {
-        Ok(Arc::new(crate::callbacks::AuditClient::new(
+        Ok(Arc::new(crate::callbacks::AuditClient::new_for_test(
             module.clone(),
             crate::callbacks::PeerBinding::new(
                 host.unique_name().as_ref().map(tinybus::BusName::as_str),

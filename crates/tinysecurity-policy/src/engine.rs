@@ -381,13 +381,17 @@ pub(crate) fn validate_settings(p: &PolicyConfig) -> Result<()> {
     }
     if p.forbidden_paths
         .iter()
-        .any(|root| !std::path::Path::new(root).is_absolute() || path::floor(root))
+        .any(|root| !std::path::Path::new(root).is_absolute())
         || p.allowed_commands
             .iter()
             .any(|c| c.is_empty() || c.chars().any(char::is_whitespace))
     {
         return Err(Error::InvalidConfig);
     }
+    // Protected paths in a denylist are redundant denials. Use the same
+    // normalizer as registered policies to reject malformed paths without
+    // mistaking an explicit credential/system denial for an invalid root.
+    crate::scoped_forbidden::effective_forbidden(p, None).map_err(|_| Error::InvalidConfig)?;
     Ok(())
 }
 

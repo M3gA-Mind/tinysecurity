@@ -101,7 +101,7 @@ pub(super) fn configured_fixture(
     secret: &Arc<SecretState>,
     engine: &Arc<tinysecurity::approval::Engine>,
 ) -> tinybus::Result<(FixtureCipher, Arc<crate::callbacks::AuditClient>)> {
-    let audit_client = Arc::new(crate::callbacks::AuditClient::new(
+    let audit_client = Arc::new(crate::callbacks::AuditClient::new_for_test(
         connection.clone(),
         binding.clone(),
         audit.clone(),

@@ -22,6 +22,54 @@ pub struct ApprovalLoadResponse2 {
     /// Scoped sanitized rows, uniquely identified within this snapshot.
     pub records: Vec<ApprovalRecord2>,
 }
+/// Delete undecided approval rows for one redacted session within one subject.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalPurgeSessionRequest2 {
+    /// Sanitized durable scope, mapped by the verified trusted host adapter.
+    pub scope: SubjectScope,
+    /// Session identifier after the configured identifier redactor.
+    pub session_id: String,
+}
+impl std::fmt::Debug for ApprovalPurgeSessionRequest2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApprovalPurgeSessionRequest2([REDACTED])")
+    }
+}
+/// Exact response to an undecided-row session purge.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalPurgeSessionResponse2 {
+    /// Exact requested durable scope.
+    pub scope: SubjectScope,
+    /// Exact requested redacted session identifier.
+    pub session_id: String,
+    /// Number of undecided rows removed, at most the bounded store inventory.
+    pub removed: u32,
+}
+impl std::fmt::Debug for ApprovalPurgeSessionResponse2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApprovalPurgeSessionResponse2([REDACTED])")
+    }
+}
+impl ApprovalPurgeSessionRequest2 {
+    /// Verify that a purge response matches this exact scope and session.
+    ///
+    /// # Errors
+    /// Rejects malformed identifiers, mismatched echoes or an impossible count.
+    pub fn verify_response(&self, response: &ApprovalPurgeSessionResponse2) -> crate::Result<()> {
+        validate_scope(&self.scope)?;
+        if self.session_id.is_empty()
+            || self.session_id.len() > 1024
+            || self.scope != response.scope
+            || self.session_id != response.session_id
+            || response.removed > 1024
+        {
+            return Err(crate::Error::InvalidArguments);
+        }
+        Ok(())
+    }
+}
 impl std::fmt::Debug for ApprovalLoadResponse2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ApprovalLoadResponse2([REDACTED])")
@@ -169,6 +217,8 @@ pub mod callback_names2 {
     pub const APPEND: &str = "Append";
     /// Atomic storage mutation member.
     pub const CAS: &str = "Cas";
+    /// Remove only undecided approval rows bound to the exact session.
+    pub const PURGE_SESSION: &str = "PurgeSession";
     /// Scoped read member.
     pub const LOAD: &str = "Load";
     /// Deliver a real per-user prompt; delivery alone is never authority.

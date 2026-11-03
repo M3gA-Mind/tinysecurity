@@ -150,3 +150,13 @@ pub struct CommandDecision {
     /// Stable reason for a block; no command/arguments/error strings.
     pub denial: Option<CommandDenial>,
 }
+
+/// Original host-derived command checked before execution with stable audit correlation.
+pub type CheckCommandAuditedRequest2 = crate::AuditedRequest2<CommandRequest>;
+
+/// Command decision exposed only after its execution reservation is durably audited.
+pub type CheckCommandAuditedResponse2 = crate::AuditedResponse2<Option<CommandDecision>>;
+
+#[cfg(test)]
+#[path = "command_policy_tests.rs"]
+mod tests;

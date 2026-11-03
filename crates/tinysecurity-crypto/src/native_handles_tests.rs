@@ -543,6 +543,8 @@ pub(super) fn human_receipt(binding: &Binding) -> Result<HumanGrantReceipt> {
         host_instance: "4".repeat(32),
         nonce: "5".repeat(32),
         tool_name: "native_secret_grant".into(),
+        session_id: None,
+        audit_error: None,
         external_effect: false,
         args_redacted: binding.safe_arguments(),
         summary: "native key authority".into(),

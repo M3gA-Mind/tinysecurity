@@ -9,12 +9,12 @@ use tinysecurity_bus::{
     ApprovalActionRequest2, ApprovalCasRequest2, ApprovalCasResponse2, ApprovalChoice2,
     ApprovalConfig2, ApprovalDeliveryRequest2, ApprovalDeliveryResponse2, ApprovalGrants2,
     ApprovalHistoryImport2, ApprovalLifecycle2, ApprovalLoadRequest2, ApprovalLoadResponse2,
-    ApprovalRecordRequest2, ApprovalRow2, ApprovalScope2, ApprovalScopeOutcome2,
-    ApprovalScopeReceipt2, AuditCorrelation2, CallerContext, Check, DecideRequest2,
-    EvaluateApprovalRequest2, EvaluateRequest, HUMAN_ONLY_TOOLS2, HumanDecisionReceipt2,
-    MAX_APPROVAL_SCOPES2, Origin, PreauthorizeFlowRequest2, RecordExecutionRequest2, RedactMode,
-    RegisterApprovalScopeRequest2, RetireApprovalScopeRequest2, SubjectScope, ToolCall,
-    VerifyHumanRequest2,
+    ApprovalPurgeSessionRequest2, ApprovalRecordRequest2, ApprovalRow2, ApprovalScope2,
+    ApprovalScopeOutcome2, ApprovalScopeReceipt2, AuditCorrelation2, CallerContext, Check,
+    DecideRequest2, EvaluateApprovalRequest2, EvaluateRequest, HUMAN_ONLY_TOOLS2,
+    HumanDecisionReceipt2, MAX_APPROVAL_SCOPES2, Origin, PreauthorizeFlowRequest2,
+    RecordExecutionRequest2, RedactMode, RegisterApprovalScopeRequest2,
+    RetireApprovalScopeRequest2, SubjectScope, ToolCall, VerifyHumanRequest2,
 };
 use tinysecurity_redact::Redactor;
 /// Trusted acknowledgement binding an exact row to the untouched actual sink receipt.
@@ -122,6 +122,15 @@ pub trait Ports: Send + Sync + std::fmt::Debug {
     /// # Errors
     /// Timeout is indeterminate; conflicting mutation reuse must reject.
     async fn cas(&self, request: ApprovalCasRequest2) -> Result<ApprovalCasResponse2>;
+    /// Remove undecided rows for one exact session in one exact subject.
+    /// # Errors
+    /// Rejects an unavailable store or a response that does not echo the request.
+    async fn purge_session(
+        &self,
+        _request: ApprovalPurgeSessionRequest2,
+    ) -> Result<tinysecurity_bus::ApprovalPurgeSessionResponse2> {
+        Err(Error::Denied)
+    }
     /// Deliver a verified per-user prompt; never a decision.
     /// # Errors
     /// Rejects unavailable or unverified human channels.
@@ -255,6 +264,9 @@ impl ScopeEntry {
         durable_flow: bool,
         durable_tool: bool,
     ) -> Option<&'static str> {
+        if self.scope.require_approval && !durable_tool && !durable_flow {
+            return None;
+        }
         match rule {
             tinysecurity_auto::rules::Rule::Approval => self
                 .grant(
@@ -532,6 +544,7 @@ impl Engine {
         if expiry <= now {
             return Err(Error::Denied);
         }
+        let session_id = bound.caller.thread.clone();
         let row = ApprovalRow2 {
             request_id: binding::opaque()?,
             version: 1,
@@ -539,6 +552,8 @@ impl Engine {
             host_instance: self.instance.clone(),
             nonce: binding::opaque()?,
             tool_name: self.begin_tool_label(&request.request.call.tool, deadline.is_some())?,
+            session_id,
+            audit_error: None,
             external_effect,
             args_redacted,
             summary: binding::text(&self.redactor()?, &request.summary, RedactMode::Text)?,
@@ -1052,6 +1067,8 @@ impl Engine {
             host_instance: self.instance.clone(),
             nonce: binding::opaque()?,
             tool_name: "imported-history".into(),
+            session_id: None,
+            audit_error: None,
             external_effect: false,
             args_redacted: "{}".into(),
             summary: "imported-history".into(),
@@ -1675,7 +1692,7 @@ impl Engine {
         let entry = self.entry(&request.scope_id)?;
         // An unlabelled call is approved by a whole-tool grant alone; a flow grant
         // added since never keeps its approval alive.
-        let mut granted = if row.binding.origin == Origin::Unlabelled {
+        let mut granted = if matches!(row.binding.origin, Origin::Unlabelled | Origin::Unknown) {
             entry.tool_grant(&request.request.call.tool).is_some()
         } else {
             entry
@@ -1794,6 +1811,41 @@ impl Engine {
         self.persist(Some(previous), &row).await?;
         Ok(row)
     }
+    /// Persist only a redacted diagnostic after an audit sink failure.
+    /// This metadata mutation never changes the approval lifecycle or grants authority.
+    /// # Errors
+    /// Rejects invalid diagnostics, stale rows, mismatched scopes or unavailable storage.
+    pub async fn record_audit_error(
+        &self,
+        request: tinysecurity_bus::RecordAuditErrorRequest2,
+    ) -> Result<ApprovalRow2> {
+        if request.audit_error.is_empty() || request.audit_error.len() > 8192 {
+            return Err(Error::Invalid);
+        }
+        let reg = self.registration(&request.scope_id)?;
+        let mut row = self.row(&reg, &request.request_id).await?;
+        Self::current(&reg, &row)?;
+        let sanitized = binding::text(&self.redactor()?, &request.audit_error, RedactMode::Text)?;
+        let sanitized = if sanitized.chars().count() > 512 {
+            let head: String = sanitized.chars().take(511).collect();
+            format!("{head}…")
+        } else {
+            sanitized
+        };
+        Self::correlation(&request.audit, reg.generation)?;
+        if row.audit_error.as_deref() == Some(&sanitized) && row.audit == request.audit {
+            return Ok(row);
+        }
+        if row.audit_error.is_some() {
+            return Err(Error::Conflict);
+        }
+        let previous = row.version;
+        row.version = previous.checked_add(1).ok_or(Error::Invalid)?;
+        row.audit_error = Some(sanitized);
+        row.audit = request.audit;
+        self.persist(Some(previous), &row).await?;
+        Ok(row)
+    }
     fn current(reg: &ApprovalScope2, row: &ApprovalRow2) -> Result<()> {
         if row.binding.generation != reg.generation
             || row.binding.scope != binding::scope_handle(&reg.subject)?
@@ -1853,6 +1905,71 @@ impl Engine {
     /// Rejects malformed, cross-owner or unavailable storage.
     pub async fn list(&self, scope_id: &str) -> Result<Vec<ApprovalRow2>> {
         self.rows(&self.registration(scope_id)?).await
+    }
+    /// Read the newest durable decisions across currently registered scopes.
+    /// Pending requests are excluded; the result is bounded to 1..=500 rows.
+    /// # Errors
+    /// Rejects malformed rows or unavailable scope stores.
+    pub async fn list_recent_decisions(&self, limit: usize) -> Result<Vec<ApprovalRow2>> {
+        let scopes = self
+            .scopes
+            .read()
+            .map_err(|_| Error::Unavailable)?
+            .by_id
+            .values()
+            .map(|entry| entry.scope.clone())
+            .collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        for scope in scopes {
+            rows.extend(
+                self.rows(&scope)
+                    .await?
+                    .into_iter()
+                    .filter(|row| row.state != ApprovalLifecycle2::Pending),
+            );
+        }
+        rows.sort_by(|left, right| {
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then_with(|| left.request_id.cmp(&right.request_id))
+        });
+        rows.truncate(limit.clamp(1, 500));
+        Ok(rows)
+    }
+    /// Remove undecided rows belonging to one session across registered subjects.
+    /// The session identifier is redacted once and matched against stored row hashes.
+    /// Decided rows remain as durable audit history.
+    /// # Errors
+    /// Rejects invalid identifiers, malformed responses or unavailable stores.
+    pub async fn purge_session(&self, session_id: &str) -> Result<usize> {
+        if session_id.trim().is_empty() || session_id.len() > 1024 {
+            return Err(Error::Invalid);
+        }
+        let session_id = binding::text(&self.redactor()?, session_id, RedactMode::IdentifierHash)?;
+        let scopes = self
+            .scopes
+            .read()
+            .map_err(|_| Error::Unavailable)?
+            .by_id
+            .values()
+            .map(|entry| entry.scope.clone())
+            .collect::<Vec<_>>();
+        let mut removed = 0_usize;
+        for scope in scopes {
+            let request = ApprovalPurgeSessionRequest2 {
+                scope: binding::scope_handle(&scope.subject)?,
+                session_id: session_id.clone(),
+            };
+            let response = self.ports.purge_session(request.clone()).await?;
+            request
+                .verify_response(&response)
+                .map_err(|_| Error::Invalid)?;
+            removed = removed
+                .checked_add(response.removed as usize)
+                .ok_or(Error::Invalid)?;
+        }
+        Ok(removed)
     }
     /// Resolve pending or approved state as cancelled, retaining its captured scope.
     /// # Errors

@@ -386,3 +386,50 @@ fn an_earlier_approval_requirement_never_masks_a_later_hard_denial() -> Result<(
     assert_ne!(first, needs_approval);
     Ok(())
 }
+
+#[test]
+fn redundant_protected_paths_in_the_denylist_keep_the_unconditional_floor()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let action = dir.path().join("action");
+    let workspace = dir.path().join("state");
+    std::fs::create_dir(&action)?;
+    std::fs::create_dir(&workspace)?;
+    let protected = action.join(".ssh").join("id_rsa");
+    for enabled in [false, true] {
+        let config = ModuleConfig {
+            policy: PolicyConfig {
+                enabled,
+                action_dir: action.display().to_string(),
+                workspace_dir: workspace.display().to_string(),
+                allowed_commands: vec![],
+                forbidden_paths: vec![action.join(".ssh").display().to_string()],
+            },
+            ..Default::default()
+        };
+        let policy = Policy::new(config)?;
+        assert_eq!(
+            path::check(
+                &policy.info().policy,
+                &protected.display().to_string(),
+                false
+            ),
+            Err(DenialReason::Floor),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn bootstrap_forbidden_paths_still_reject_relative_traversal_and_nul_entries() {
+    let base = std::env::temp_dir();
+    for forbidden in [
+        "relative/private".to_string(),
+        base.join("../private").display().to_string(),
+        format!("{}\0private", base.display()),
+    ] {
+        let mut config = ModuleConfig::default();
+        config.policy.forbidden_paths = vec![forbidden];
+        assert!(matches!(Policy::new(config), Err(Error::InvalidConfig)));
+    }
+}

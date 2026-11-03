@@ -32,6 +32,26 @@ impl Store {
         }))
         .await
     }
+
+    async fn purge_session(
+        &self,
+        request: ApprovalPurgeSessionRequest2,
+    ) -> tinybus::Result<ApprovalPurgeSessionResponse2> {
+        std::future::ready(Ok(ApprovalPurgeSessionResponse2 {
+            scope: if self.wrong {
+                self.scope.clone()
+            } else {
+                request.scope
+            },
+            session_id: if self.wrong {
+                "wrong-session".into()
+            } else {
+                request.session_id
+            },
+            removed: 1,
+        }))
+        .await
+    }
 }
 fn config() -> ApprovalConfig2 {
     ApprovalConfig2 {
@@ -61,7 +81,7 @@ async fn real_store_clients_validate_exact_scope_receipt_and_fixed_unique_peer()
     let config = config();
     let scope = tinysecurity::approval::scope_handle(&config.scopes[0].subject)?;
     let peer = host.unique_name().ok_or("host peer")?;
-    let client = ApprovalStoreClient::new(module.clone(), Some(peer.as_str()), &config)?;
+    let client = ApprovalStoreClient::new_for_test(module.clone(), Some(peer.as_str()), &config)?;
     assert!(
         client
             .load(ApprovalLoadRequest2 {
@@ -153,6 +173,115 @@ async fn real_store_clients_validate_exact_scope_receipt_and_fixed_unique_peer()
     broker.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn approval_store_client_does_not_send_to_an_unattested_host()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bus = MemoryBus::new();
+    let broker = Broker::new().spawn(bus.clone());
+    let host = tinybus::Connection::connect(bus.connect().await?).await?;
+    let module = tinybus::Connection::connect(bus.connect().await?).await?;
+    let config = config();
+    let scope = tinysecurity::approval::scope_handle(&config.scopes[0].subject)?;
+    host.serve_at(
+        callback_names2::OBJECT_PATH.parse()?,
+        Store {
+            scope: scope.clone(),
+            wrong: false,
+        },
+    )
+    .await?;
+    let client = ApprovalStoreClient::new(
+        module,
+        Some(host.unique_name().ok_or("host peer")?.as_str()),
+        &config,
+    )?;
+
+    // Confidential calls to an unattested peer are rejected before its ordinary
+    // callback can receive approval rows. An ordinary call would succeed here.
+    assert!(
+        client
+            .load(ApprovalLoadRequest2 {
+                scope: scope.clone()
+            })
+            .await
+            .is_err()
+    );
+    let request = ApprovalCasRequest2 {
+        scope,
+        record_id: "b".repeat(32),
+        expected_version: None,
+        next_record: ApprovalRecord2 {
+            record_id: "b".repeat(32),
+            version: 1,
+            policy_id: "scope".into(),
+            generation: 1,
+            fingerprint: "c".repeat(32),
+            record_json: "{}".into(),
+        },
+        mutation_id: "d".repeat(32),
+    };
+    assert!(client.cas(request).await.is_err());
+    host.close().await?;
+    drop(broker);
+    Ok(())
+}
+
+#[tokio::test]
+async fn store_client_rejects_empty_init_scope_list()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bus = MemoryBus::new();
+    let broker = Broker::new().spawn(bus.clone());
+    let host = tinybus::Connection::connect(bus.connect().await?).await?;
+    let module = tinybus::Connection::connect(bus.connect().await?).await?;
+    let mut config = config();
+    config.scopes.clear();
+
+    assert!(
+        ApprovalStoreClient::new(
+            module,
+            host.unique_name().as_ref().map(tinybus::BusName::as_str),
+            &config,
+        )
+        .is_err()
+    );
+    broker.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn store_client_purges_session_only_through_registered_scope()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bus = MemoryBus::new();
+    let broker = Broker::new().spawn(bus.clone());
+    let host = tinybus::Connection::connect(bus.connect().await?).await?;
+    let module = tinybus::Connection::connect(bus.connect().await?).await?;
+    let config = config();
+    let scope = tinysecurity::approval::scope_handle(&config.scopes[0].subject)?;
+    host.serve_at(
+        callback_names2::OBJECT_PATH.parse()?,
+        Store {
+            scope: scope.clone(),
+            wrong: false,
+        },
+    )
+    .await?;
+    let client = ApprovalStoreClient::new_for_test(
+        module,
+        host.unique_name().as_ref().map(tinybus::BusName::as_str),
+        &config,
+    )?;
+    let request = ApprovalPurgeSessionRequest2 {
+        scope: scope.clone(),
+        session_id: "session-private".into(),
+    };
+    assert_eq!(client.purge_session(request.clone()).await?.removed, 1);
+    let mut outside_scope = request;
+    outside_scope.scope.user = "other".into();
+    assert!(client.purge_session(outside_scope).await.is_err());
+    broker.abort();
+    Ok(())
+}
 #[tokio::test]
 async fn unrelated_receipts_do_not_confirm_store_commits()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -173,7 +302,7 @@ async fn unrelated_receipts_do_not_confirm_store_commits()
         },
     )
     .await?;
-    let client = ApprovalStoreClient::new(
+    let client = ApprovalStoreClient::new_for_test(
         module,
         host.unique_name().as_ref().map(tinybus::BusName::as_str),
         &config(),
@@ -189,7 +318,7 @@ async fn unrelated_receipts_do_not_confirm_store_commits()
     assert!(
         client
             .cas(ApprovalCasRequest2 {
-                scope,
+                scope: scope.clone(),
                 record_id: "b".repeat(32),
                 expected_version: None,
                 next_record: ApprovalRecord2 {
@@ -201,6 +330,15 @@ async fn unrelated_receipts_do_not_confirm_store_commits()
                     record_json: "{}".into()
                 },
                 mutation_id: "d".repeat(32)
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .purge_session(ApprovalPurgeSessionRequest2 {
+                scope,
+                session_id: "session-private".into(),
             })
             .await
             .is_err()
@@ -235,7 +373,7 @@ async fn registered_store_that_never_replies_is_bounded_by_the_captured_deadline
     .await?;
     let mut config = config();
     config.timeout_ms = 1;
-    let client = ApprovalStoreClient::new(
+    let client = ApprovalStoreClient::new_for_test(
         module,
         host.unique_name().as_ref().map(tinybus::BusName::as_str),
         &config,
@@ -486,6 +624,8 @@ fn audit_row(scope: SubjectScope) -> ApprovalRow2 {
         host_instance: "f".repeat(32),
         nonce: "1".repeat(32),
         tool_name: "native_secret_grant".into(),
+        session_id: None,
+        audit_error: None,
         external_effect: true,
         args_redacted: "{}".into(),
         summary: "native grant".into(),
@@ -862,6 +1002,14 @@ async fn clients_admit_a_runtime_subject_with_its_own_stream_and_release_it()
     let base = config();
     let redactor =
         tinysecurity::Redactor::new(&tinysecurity_bus::RedactorConfig { secrets: vec![] })?;
+    host.serve_at(
+        callback_names2::OBJECT_PATH.parse()?,
+        Store {
+            scope: base.scopes[0].subject.clone(),
+            wrong: false,
+        },
+    )
+    .await?;
     let clients = ApprovalClients::new(
         &module,
         Some(peer.as_str()),
@@ -869,6 +1017,19 @@ async fn clients_admit_a_runtime_subject_with_its_own_stream_and_release_it()
         &native_audit_config(base.scopes[0].subject.clone(), false),
         &redactor,
     )?;
+    assert_eq!(format!("{clients:?}"), "ApprovalClients([REDACTED])");
+    let mut invalid_audit = native_audit_config(base.scopes[0].subject.clone(), false);
+    invalid_audit.stream_id = "short".into();
+    assert!(
+        ApprovalClients::new(
+            &module,
+            Some(peer.as_str()),
+            &base,
+            &invalid_audit,
+            &redactor,
+        )
+        .is_err()
+    );
     let scope = runtime_scope(2);
     let handle = tinysecurity::approval::scope_handle(&scope.subject)?;
     // A malformed stream never admits the subject.
@@ -880,6 +1041,18 @@ async fn clients_admit_a_runtime_subject_with_its_own_stream_and_release_it()
     assert!(clients.admit_scope(&scope, &"e".repeat(32)).await.is_err());
     clients.admit_scope(&scope, &"d".repeat(32)).await?;
     assert!(clients.store.scope(&handle).is_ok());
+    let purge = ApprovalPurgeSessionRequest2 {
+        scope: handle.clone(),
+        session_id: "session-private".into(),
+    };
+    assert_eq!(
+        clients.purge_session(purge).await?,
+        ApprovalPurgeSessionResponse2 {
+            scope: handle.clone(),
+            session_id: "session-private".into(),
+            removed: 1,
+        }
+    );
     {
         let held = clients.audit.read().map_err(|_| "lock")?;
         assert_eq!(held.iter().filter(|(s, _)| s == &handle).count(), 1);

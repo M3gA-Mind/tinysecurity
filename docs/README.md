@@ -20,6 +20,8 @@ docs/
 - **[`module-crypto.md`](module-crypto.md)** — confidential device, master, cipher, password, keyring and pairing members of the TinySecurity module contract.
 - **[`module-subject-policies.md`](module-subject-policies.md)** — registered subject policy members and their generation-bound authorization rules.
 - **[`specs/device-pairing-contract-1.25.md`](specs/device-pairing-contract-1.25.md)** — host-attested paired-device lifecycle contract and trust boundaries.
+- **[`specs/local-provider-endpoint-1.32.md`](specs/local-provider-endpoint-1.32.md)** — same-machine-only provider locality for `LocalOnly` privacy checks.
+- **[`plans/local-provider-endpoint-1.32.md`](plans/local-provider-endpoint-1.32.md)** — ordered implementation and verification steps for provider locality classification.
 - **[`plans/device-pairing-contract-1.25.md`](plans/device-pairing-contract-1.25.md)** — ordered implementation and verification steps for pairing lifecycle support.
 - **[`specs/browser-dial-contract-1.28.md`](specs/browser-dial-contract-1.28.md)** — destination-only, one-use socket authorization for opaque browser traffic.
 - **[`specs/runtime-secret-scopes-contract-1.29.md`](specs/runtime-secret-scopes-contract-1.29.md)** — host-only runtime secret registration bound to live approval scopes.

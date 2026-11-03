@@ -55,6 +55,24 @@ fn private_keys_urls_assignments_and_validators_are_selective() -> Result<()> {
     assert!(!Validator::Iban.valid("DE00370400440532013000"));
     Ok(())
 }
+
+#[test]
+fn card_numbers_need_issuer_or_nearby_context() -> Result<()> {
+    let patterns = Patterns::new(&RedactorConfig::default())?;
+    let timestamp = "1787178633773";
+    assert_eq!(patterns.text(timestamp)?, timestamp);
+    let digits = ["7", "123456789012345"].concat();
+    let candidate = (0..10)
+        .map(|check| format!("{digits}{check}"))
+        .find(|value| Validator::Card.valid(value))
+        .ok_or(Error::Faulted)?;
+    assert_eq!(patterns.text(&candidate)?, candidate);
+    assert_eq!(
+        patterns.text(&format!("card number {candidate}"))?,
+        format!("card number {MARKER}")
+    );
+    Ok(())
+}
 #[test]
 fn registry_rejects_literals_that_embed_generated_markers() {
     for secret in [

@@ -167,7 +167,7 @@ async fn required_audit_gates_scoped_permission_on_a_committed_receipt()
     let dir = tempfile::tempdir()?;
     let required = service_for(
         policy.clone(),
-        Some(Arc::new(crate::callbacks::AuditClient::new(
+        Some(Arc::new(crate::callbacks::AuditClient::new_for_test(
             module,
             binding,
             permission_audit_config(true),
@@ -266,5 +266,215 @@ async fn scoped_audited_members_need_a_configured_audit_client()
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn required_audit_path_permission_exposes_a_result_only_after_a_durable_receipt()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bus = MemoryBus::new();
+    let broker = Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await?).await?;
+    let module = Connection::connect(bus.connect().await?).await?;
+    let binding = crate::callbacks::PeerBinding::new(
+        host.unique_name().as_ref().map(tinybus::BusName::as_str),
+    )?;
+    let policy = Arc::new(RwLock::new(Policy::new(ModuleConfig::default())?));
+    let required = service_for(
+        policy.clone(),
+        Some(Arc::new(crate::callbacks::AuditClient::new_for_test(
+            module,
+            binding,
+            permission_audit_config(true),
+            tinysecurity::Redactor::new(&RedactorConfig::default())?,
+        )?)),
+    );
+    let root = tempfile::tempdir()?;
+    let path_policy = required
+        .register_path_policy(PathPolicy {
+            enabled: false,
+            workspace_only: false,
+            workspace_dir: root.path().into(),
+            action_dir: root.path().into(),
+            home_dir: None,
+            forbidden_paths: vec![],
+            trusted_roots: vec![],
+            reserved_paths: vec![],
+            reserved_prefixes: vec![],
+            readonly_paths: vec![],
+            reserved_names: vec![],
+        })
+        .await?;
+    let path = PathValidationRequest {
+        policy_id: path_policy,
+        path: root.path().join("uploads/file").display().to_string(),
+    };
+    assert!(
+        required.validate_parent(path.clone()).await.is_err(),
+        "legacy unaudited permission must remain refused"
+    );
+    let request = |id, tail| AuditedRequest2 {
+        request: PermissionRequest2::ValidateParent(path.clone()),
+        audit: correlation(id, tail),
+    };
+    let lost = required.check_permission_audited2(request('a', 0)).await?;
+    assert!(!lost.audit.permitted && lost.decision.is_none());
+    let rows = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    host.serve_at(
+        callback_names2::OBJECT_PATH.parse()?,
+        PermissionAuditSink {
+            rows: rows.clone(),
+            policy,
+            change_generation: Arc::default(),
+        },
+    )
+    .await?;
+    let allowed = required.check_permission_audited2(request('b', 0)).await?;
+    assert!(allowed.audit.permitted && allowed.audit.committed);
+    assert!(matches!(
+        allowed.decision,
+        Some(PermissionResult2::Path(
+            PathValidationResult::Allowed { .. }
+        ))
+    ));
+    verify_audited_native_queries(&required, root.path(), &path).await?;
+    verify_audited_budget_queries(&required).await?;
+    let mut stale = request('c', 8);
+    stale.audit.generation = 0;
+    let stale = required.check_permission_audited2(stale).await?;
+    assert!(!stale.audit.permitted && stale.decision.is_none());
+    assert_eq!(rows.lock().map_err(|_| "fixture rows")?.len(), 11);
+    broker.abort();
+    Ok(())
+}
+
+async fn verify_audited_native_queries(
+    required: &PolicyService,
+    root: &std::path::Path,
+    path: &PathValidationRequest,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let read_path = root.join("read.txt");
+    std::fs::write(&read_path, "fixture")?;
+    let command_policy = required.register_command_policy(command_fixture()?).await?;
+    let queries = [
+        PermissionRequest2::ValidatePath(PathValidationRequest {
+            policy_id: path.policy_id.clone(),
+            path: read_path.display().to_string(),
+        }),
+        PermissionRequest2::CheckPath(PathCheckRequest {
+            policy_id: path.policy_id.clone(),
+            path: read_path.clone(),
+            kind: PathCheckKind::ResolvedRead,
+        }),
+        PermissionRequest2::CheckPaths(PathBatchRequest2 {
+            policy_id: path.policy_id.clone(),
+            kind: PathCheckKind::ResolvedRead,
+            paths: vec![read_path.clone(), root.join(".ssh/key")],
+        }),
+        PermissionRequest2::GateCommand(CommandRequest {
+            policy_id: command_policy.clone(),
+            command: "pwd".into(),
+            declared_class: None,
+        }),
+        PermissionRequest2::PeekBudget(BudgetRequest2 { command_policy }),
+        PermissionRequest2::PrivacyCheck(PrivacyCheckRequest2 {
+            privacy: PrivacyMode::Standard,
+            external: true,
+            class: PrivacyDataClass2::Metadata,
+            destination_label: "fixture".into(),
+            risk: None,
+        }),
+        PermissionRequest2::ValidateParent(PathValidationRequest {
+            policy_id: path.policy_id.clone(),
+            path: root.join(".ssh/key").display().to_string(),
+        }),
+    ];
+    for (index, query) in queries.into_iter().enumerate() {
+        let tail = u64::try_from(index)? + 1;
+        let result = required
+            .check_permission_audited2(AuditedRequest2 {
+                request: query,
+                audit: AuditCorrelation2 {
+                    event_id: format!("{:032x}", index + 16),
+                    expected_tail: tail,
+                    generation: 1,
+                },
+            })
+            .await?;
+        assert!(result.audit.permitted && result.audit.committed);
+        match (index, result.decision) {
+            (0, Some(PermissionResult2::Path(PathValidationResult::Allowed { .. })))
+            | (1, Some(PermissionResult2::PathAllowed(true)))
+            | (
+                3,
+                Some(PermissionResult2::Command(CommandDecision {
+                    gate: CommandGate::Allow,
+                    ..
+                })),
+            )
+            | (4, Some(PermissionResult2::Budget(BudgetDecision2::Allow))) => {}
+            (2, Some(PermissionResult2::Paths(result))) => {
+                assert_eq!(result.allowed, [true, false]);
+            }
+            (5, Some(PermissionResult2::Privacy(result))) => {
+                assert_eq!(result.decision.verdict, Verdict::Allow);
+            }
+            (6, Some(PermissionResult2::Path(PathValidationResult::Denied { category }))) => {
+                assert_eq!(category, PathErrorCategory::Protected);
+            }
+            (_, result) => {
+                return Err(format!("unexpected audited permission result: {result:?}").into());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn verify_audited_budget_queries(
+    required: &PolicyService,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    for (index, (enabled, autonomy, limit, expected)) in [
+        (false, CommandAutonomy::Full, 1, BudgetDecision2::Allow),
+        (
+            true,
+            CommandAutonomy::ReadOnly,
+            1,
+            BudgetDecision2::ReadOnlyMode,
+        ),
+        (
+            true,
+            CommandAutonomy::Full,
+            0,
+            BudgetDecision2::RateLimited { max_per_hour: 0 },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let command_policy = required
+            .register_command_policy(CommandPolicy {
+                enabled,
+                autonomy,
+                max_actions_per_hour: limit,
+                ..command_fixture()?
+            })
+            .await?;
+        let request = AuditedRequest2 {
+            request: PermissionRequest2::PeekBudget(BudgetRequest2 { command_policy }),
+            audit: AuditCorrelation2 {
+                event_id: format!("{:032x}", index + 64),
+                expected_tail: u64::try_from(index)? + 8,
+                generation: 1,
+            },
+        };
+        let response = required.check_permission_audited2(request.clone()).await?;
+        assert!(response.audit.permitted && response.audit.committed);
+        assert_eq!(response.decision, Some(PermissionResult2::Budget(expected)));
+        assert_eq!(
+            required.check_permission_audited2(request).await?,
+            response,
+            "an exact audited replay must not spend or change the budget"
+        );
+    }
     Ok(())
 }
