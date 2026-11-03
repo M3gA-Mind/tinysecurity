@@ -636,14 +636,12 @@ jobs:
           set -euo pipefail
           archive="${CRATE_NAME}-${VERSION}-ubuntu-24.04-x86_64.tar.gz"
           release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          # Only the [sha256] table: the archive name also keys
+          # [library_sha256]. Exits non-zero unless one valid digest is found.
           sha256="$(
-            sed -n "s/^\"${archive}\" = \"\([0-9a-f]\{64\}\)\"$/\1/p" \
-              release-assets/checksum.toml
+            python3 .github/scripts/verify_release_assets.py --sha256 \
+              release-assets/checksum.toml "$archive"
           )"
-          if [[ -z "$sha256" ]]; then
-            echo "checksum missing for ${archive}" >&2
-            exit 1
-          fi
 
           # The generic TinyBus example supplies {}, which is intentionally not
           # a valid TinySecurity init config. This verifier uses ModuleConfig
