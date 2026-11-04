@@ -49,6 +49,14 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
 
+      # The released module is built without optional features; it must not
+      # link libdbus or anything else a minimal server image lacks.
+      - name: Require a Linux module with only base C runtime dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          cargo build --locked --release --lib --package tinysecurity-module
+          .github/scripts/check-module-needed-libs.sh target/release/libtinysecurity_module.so
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov

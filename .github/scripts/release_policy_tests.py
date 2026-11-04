@@ -50,5 +50,20 @@ class ReleasePolicyTests(unittest.TestCase):
                     self.assertEqual(allows(guard, repository, ref), expected)
 
 
+class ReleaseModuleLinkTests(unittest.TestCase):
+    def test_release_builds_leave_the_dbus_keyring_off(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        # The prepare job still tests with --all-features and so needs libdbus-1-dev;
+        # only the jobs that build the shipped library are held to this.
+        bundles = workflow[workflow.index("\n  native-bundles:") :]
+        self.assertNotIn("--features", bundles)
+        self.assertNotIn("libdbus", bundles)
+        self.assertNotIn("dbus-devel", bundles)
+
+    def test_every_linux_release_build_checks_needed_libraries(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertEqual(workflow.count("check-module-needed-libs.sh"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

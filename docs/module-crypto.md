@@ -187,8 +187,9 @@ decrypt unchanged. At most two derivations run at once and there is no wait queu
 `KeyringAccess2` reads, writes or deletes a named secret on a backend chosen at
 init: platform default (Keychain, Credential Manager, Linux kernel keyring),
 Linux kernel keyring, or a protected encrypted file in an absolute directory.
-Linux Secret Service is enabled in Linux release artifacts; other builds keep
-the feature opt-in and fail closed when it is not compiled. Every
+Linux Secret Service is opt-in (`keyring-secret-service`, which links libdbus)
+and is not compiled into release artifacts, so they load on hosts without D-Bus;
+a build without it fails closed. Every
 operation first calls the host's `ai.tinyhumans.tinysecurity.KeyringConsent2`
 `Consent` callback with the verified caller, purpose, access kind and secret name
 (never the value), and proceeds only on an explicit allow. Invalid names or
