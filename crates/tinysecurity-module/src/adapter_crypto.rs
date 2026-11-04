@@ -494,17 +494,16 @@ async fn consent(
     // The host serves KeyringConsent2 as a confidential callback endpoint and
     // refuses an ordinary call.
     #[cfg(test)]
-    let reply: tinybus::Result<KeyringConsentResponse2> = if keyring.consent.ordinary {
-        proxy.call(callback_names2::CONSENT, args).await
-    } else {
+    let confidential = !keyring.consent.ordinary;
+    #[cfg(not(test))]
+    let confidential = true;
+    let reply: tinybus::Result<KeyringConsentResponse2> = if confidential {
         proxy
             .call_confidential(callback_names2::CONSENT, args)
             .await
+    } else {
+        proxy.call(callback_names2::CONSENT, args).await
     };
-    #[cfg(not(test))]
-    let reply: tinybus::Result<KeyringConsentResponse2> = proxy
-        .call_confidential(callback_names2::CONSENT, args)
-        .await;
     let reply = reply.map_err(|error| match error {
         tinybus::Error::Timeout { .. } => consent_error(KeyringConsentOutcome2::ConsentPending),
         _ => consent_error(KeyringConsentOutcome2::Unavailable),
