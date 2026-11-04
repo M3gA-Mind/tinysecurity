@@ -837,3 +837,32 @@ async fn stored_values_beyond_the_bound_and_oversized_passwords_are_refused()
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn keyring_consent_without_a_serving_host_is_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Nothing serves KeyringConsent2, so consent fails closed before any backend access.
+    let clock: Arc<dyn tinysecurity::approval::Clock> = Arc::new(StepClock::default());
+    let dir = tempfile::tempdir()?;
+    let (state, _connection, _init) =
+        standalone(config(&dir.path().canonicalize()?), clock).await?;
+    let mut service = super::super::service_for(
+        Arc::new(std::sync::RwLock::new(tinysecurity::Policy::new(
+            tinysecurity_bus::ModuleConfig::default(),
+        )?)),
+        None,
+    );
+    service.crypto = Some(state);
+    let refusal = service
+        .keyring_access(keyring_request(KeyringOperation2::Get {
+            name: "user:token".into(),
+        }))
+        .await
+        .err()
+        .ok_or("expected refusal")?;
+    assert_eq!(
+        refusal.wire_name(),
+        "ai.tinyhumans.tinysecurity.Error.Unavailable"
+    );
+    Ok(())
+}
