@@ -11,7 +11,8 @@ and audit requirements. Only a request still requiring approval reaches Jev.
 
 ## Trusted initialization
 
-`ModuleConfig.judge` is absent by default. Enabling it requires the explicit
+`ModuleConfig.judge` is absent by default; hosts turn it on by default when they
+hold a credential (ADR 0008). Enabling it requires the explicit
 resolved backend credential, exact endpoint and typed provider, an authenticated
 approval store/prompt registration and configured audit. No environment credential
 lookup or per-call credential is supported. Invalid init/reinit rejects without
