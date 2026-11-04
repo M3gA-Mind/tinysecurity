@@ -11,7 +11,7 @@ fn legacy_execution_outcomes_are_explicit_and_unknown_values_reject() {
     );
     assert_eq!(
         ExecutionOutcome::from_legacy("aborted"),
-        Ok(ExecutionOutcome::Cancelled)
+        Ok(ExecutionOutcome::Abandoned)
     );
     assert!(ExecutionOutcome::from_legacy("approved").is_err());
 }

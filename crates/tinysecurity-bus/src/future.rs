@@ -20,7 +20,7 @@ pub enum ApprovalState {
     /// Executed state.
     Executed,
 }
-/// `ExecutionOutcome` vocabulary, reserved until its engine is implemented.
+/// Terminal execution result, including runs abandoned before their effects were known.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionOutcome {
@@ -30,6 +30,8 @@ pub enum ExecutionOutcome {
     Failed,
     /// Cancelled state.
     Cancelled,
+    /// The in-flight execution was abandoned before its effects could be determined.
+    Abandoned,
 }
 /// `ReplyVerdict` vocabulary, reserved until its engine is implemented.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

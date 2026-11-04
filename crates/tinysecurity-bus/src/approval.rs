@@ -339,7 +339,7 @@ impl ExecutionOutcome {
         match value {
             "success" => Ok(Self::Succeeded),
             "failure" => Ok(Self::Failed),
-            "aborted" => Ok(Self::Cancelled),
+            "aborted" => Ok(Self::Abandoned),
             _ => Err(crate::Error::InvalidArguments),
         }
     }

@@ -2000,7 +2000,7 @@ async fn assert_invalid_sdk_reinitializations(
         setup(
             server.clone(),
             ModuleConfig {
-                contract_version: (2, 0),
+                contract_version: (3, 0),
                 ..Default::default()
             }
         )

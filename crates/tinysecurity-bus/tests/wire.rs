@@ -115,6 +115,8 @@ fn all_execution_outcome_variants_have_stable_wire_names()
         assert_eq!(serde_json::to_value(decoded)?, *v);
     }
     assert!(serde_json::from_str::<ExecutionOutcome>("\"future_unknown\"").is_err());
+    let abandoned: ExecutionOutcome = serde_json::from_str("\"abandoned\"")?;
+    assert_eq!(serde_json::to_string(&abandoned)?, "\"abandoned\"");
     Ok(())
 }
 #[test]
@@ -344,7 +346,7 @@ fn redactor_init_is_additive_and_secrets_never_enter_public_info()
         serde_json::to_value(&config)?["redactor"]["secrets"][0],
         "literal-private"
     );
-    assert_eq!(CONTRACT_VERSION, (1, 35));
+    assert_eq!(CONTRACT_VERSION, (2, 0));
     for (mode, wire) in [
         (RedactMode::Text, "text"),
         (RedactMode::StructuredArguments, "structured_arguments"),

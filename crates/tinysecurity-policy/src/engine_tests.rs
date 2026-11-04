@@ -66,12 +66,12 @@ fn verdict(policy: &Policy, request: &EvaluateRequest) -> Result<Verdict> {
 }
 
 #[test]
-fn additive_contract_minor_accepts_an_older_same_major_host() {
+fn incompatible_contract_major_rejects_an_older_host() {
     let config = ModuleConfig {
-        contract_version: (1, 28),
+        contract_version: (1, 29),
         ..Default::default()
     };
-    assert!(Policy::new(config).is_ok());
+    assert!(Policy::new(config).is_err());
 }
 
 #[test]

@@ -152,6 +152,14 @@ Default TTL is ten minutes; copilot and sub-agent TTL is three minutes.
 permission. Cron external effects deny. SaaS has no implicit bypass: configure
 a verified per-user prompt channel or deny when human approval is needed.
 
+`ExecutionOutcome::Abandoned` records an in-flight execution that was abandoned
+before the host could determine its effects. This is not a cancellation and does
+not claim that the tool had no effects. Use `Cancelled` only for a definite
+cancelled result; map legacy `aborted` values to `Abandoned` because aborting a
+wait or task does not establish the execution's outcome. The `ExecutionOutcome`
+wire enum is closed, so this value requires contract 2.0: 1.x hosts must reject
+2.x providers rather than admit a provider whose result they cannot decode.
+
 Jev is an optional judge, disabled by default and enabled per origin. It can
 only convert `RequireApproval` to `Allow`; it cannot override any `Deny`, floor,
 privacy or sandbox requirement. Redacted input and independent questions test

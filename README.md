@@ -11,6 +11,10 @@ Contract 1.25 adds `DevicePairing2`, which owns the paired-device static
 identity, ciphertext-only persistence, host-attested enrollment/reconnect,
 session refresh and revocation while preserving the existing v2/v3/v4 wire;
 see the [pairing lifecycle specification](docs/specs/device-pairing-contract-1.25.md).
+Contract 2.0 adds the `abandoned` approval execution outcome for in-flight
+executions whose effects could not be determined. Because `ExecutionOutcome` is
+a closed wire enum, 1.x hosts reject 2.x modules rather than risk decoding a
+result they cannot represent; see the [approval contract](docs/specs/approval-execution-outcomes.md).
 Contract 1.1 also supplies immutable native [filesystem scopes](docs/specs/immutable-path-scopes.md)
 through `RegisterPathPolicy`, `ValidatePath`, `ValidateParent` and `CheckPath`.
 Contract 1.3 adds native `Redact`, `ScanPrompt` and `ScanToolDefinition`, with a

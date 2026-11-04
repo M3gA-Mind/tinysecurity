@@ -456,6 +456,35 @@ fn action(row: &ApprovalRow2, phase: u64) -> ApprovalActionRequest2 {
     }
 }
 #[tokio::test]
+async fn abandoned_execution_is_persisted_as_an_immutable_unknown_effect() -> Result<()> {
+    let f = Arc::new(Fixture::default());
+    let owner = engine(f, Arc::new(TestClock::default()))?;
+    let row = owner.begin(request()).await?;
+    owner.decide(decision(&row)).await?;
+    owner.consume(action(&row, 3)).await?;
+
+    let terminal = RecordExecutionRequest2 {
+        action: action(&row, 4),
+        outcome: ExecutionOutcome::Abandoned,
+    };
+    let finished = owner.record_execution(terminal.clone()).await?;
+    assert_eq!(finished.state, ApprovalLifecycle2::Executed);
+    assert_eq!(finished.outcome, Some(ExecutionOutcome::Abandoned));
+    assert_eq!(
+        owner.list(&request().scope_id).await?,
+        vec![finished.clone()]
+    );
+    assert_eq!(owner.record_execution(terminal).await?, finished);
+
+    let mut cancelled = RecordExecutionRequest2 {
+        action: action(&row, 4),
+        outcome: ExecutionOutcome::Cancelled,
+    };
+    cancelled.action.audit = audit(5);
+    assert!(owner.record_execution(cancelled).await.is_err());
+    Ok(())
+}
+#[tokio::test]
 async fn exact_human_ticket_first_winner_once_consumption_and_terminal_outcome() -> Result<()> {
     let f = Arc::new(Fixture::default());
     let owner = engine(f, Arc::new(TestClock::default()))?;

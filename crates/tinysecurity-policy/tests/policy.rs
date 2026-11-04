@@ -67,7 +67,7 @@ fn failed_reinit_preserves_old_generation_and_configuration()
     let mut policy = Policy::new(ModuleConfig::default())?;
     let old = policy.info();
     let bad = ModuleConfig {
-        contract_version: (2, 0),
+        contract_version: (1, 29),
         ..Default::default()
     };
     assert_eq!(policy.reinitialize(bad), Err(Error::IncompatibleVersion));

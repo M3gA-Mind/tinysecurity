@@ -593,7 +593,8 @@
     "ExecutionOutcome": [
       "succeeded",
       "failed",
-      "cancelled"
+      "cancelled",
+      "abandoned"
     ],
     "ReplyVerdict": [
       "allow_once",

@@ -1,4 +1,4 @@
-//! Registered subject policy wire shapes and the 1.29 compatibility boundary.
+//! Registered subject policy wire shapes and the contract compatibility boundary.
 use serde_json::json;
 use tinysecurity_bus::*;
 
@@ -91,16 +91,19 @@ fn new_members_are_advertised_and_named_by_contract_constants() {
 }
 
 #[test]
-fn contract_bump_is_additive_for_older_hosts_and_modules() {
-    assert_eq!(CONTRACT_VERSION, (1, 35));
-    // A host built against 1.35 accepts this module and newer minors, not a 1.34 module.
-    assert!(is_compatible((1, 35)));
-    assert!(is_compatible((1, 36)));
+fn incompatible_execution_outcome_requires_a_new_contract_major() {
+    assert_eq!(CONTRACT_VERSION, (2, 0));
+    // A 2.0 host accepts compatible 2.x modules, but older 1.x hosts reject this module.
+    assert!(is_compatible((2, 0)));
+    assert!(is_compatible((2, 1)));
+    assert!(!is_compatible((1, 36)));
+    assert!(!is_compatible((1, 35)));
     assert!(!is_compatible((1, 34)));
     assert!(!is_compatible((1, 33)));
     assert!(!is_compatible((1, 30)));
     assert!(!is_compatible((1, 29)));
     assert!(!is_compatible((1, 28)));
+    assert!(!is_compatible((1, 27)));
     assert!(!is_compatible((1, 26)));
     assert!(!is_compatible((1, 25)));
     assert!(!is_compatible((1, 24)));
@@ -118,7 +121,6 @@ fn contract_bump_is_additive_for_older_hosts_and_modules() {
     // A 1.12 module cannot supply the audited scoped members.
     assert!(!is_compatible((1, 12)));
     assert!(!is_compatible((1, 11)));
-    assert!(!is_compatible((2, 0)));
 }
 
 #[test]

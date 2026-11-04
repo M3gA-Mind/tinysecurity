@@ -2242,7 +2242,7 @@ pub(super) async fn run(
     let host = start_callbacks(&lifecycle, &state).await?;
     let config = configuration(&host, mode)?;
     let loaded = lifecycle.load_file_with_config(library, serde_json::to_value(&config)?);
-    if matches!(mode, 15 | 16) {
+    if matches!(mode, 14..=16) {
         reject_invalid_config(&lifecycle, &host, loaded).await?;
         task.abort();
         return Ok(());
@@ -2254,6 +2254,9 @@ pub(super) async fn run(
         .await?
         .ok_or("native module peer")?;
     *state.module.lock().map_err(|_| denied())? = Some(module.clone());
+    // Windows native callbacks can exceed the default five-second bus timeout
+    // while completing the approval and audit handshake. Keep the outer
+    // fixture deadline above the callbacks' serial budgets for every mode.
     let proxy = host
         .proxy(module.as_str(), names::OBJECT_PATH, names::INTERFACE)?
         // Let the module's own callback deadline settle pending work. In
@@ -2372,11 +2375,14 @@ async fn execute(
         completion_audit: audit(*sequence + 2),
     };
     *sequence += 3;
-    let response = proxy
+    // Execution can make three serial audit callbacks, each with the configured
+    // 10-second deadline. Keep the fixture's outer deadline above that budget.
+    let execute_proxy = proxy.clone().with_timeout(Duration::from_secs(35));
+    let response = execute_proxy
         .call_confidential(names::methods::EXECUTE_SECRET_CIPHER2, (&execute,))
         .await;
     assert!(
-        proxy
+        execute_proxy
             .call_confidential::<SecretCipherResponse2>(
                 names::methods::EXECUTE_SECRET_CIPHER2,
                 (&execute,)

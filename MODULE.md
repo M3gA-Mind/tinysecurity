@@ -11,7 +11,7 @@ RPC methods. Configuration requires `contract_version` and `policy`. The optiona
 
 ```json
 {
-  "contract_version": [1, 12],
+  "contract_version": [2, 0],
   "policy": {
     "enabled": false,
     "action_dir": "",
@@ -393,6 +393,9 @@ Contract 1.27 adds `RevokeToolById2`. A host can revoke the opaque `request_id`
 returned by `ListToolTrust2` even when the tool's display label is redacted; the
 module verifies the row belongs to the supplied registered scope and records the
 usual audited cancellation.
+
+Approval execution outcomes and the contract 2.0 compatibility boundary are
+described in [`docs/specs/approval-execution-outcomes.md`](docs/specs/approval-execution-outcomes.md).
 
 ### Scored prompt screening: `ScanPrompt2`
 
