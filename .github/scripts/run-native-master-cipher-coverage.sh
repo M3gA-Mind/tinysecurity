@@ -39,4 +39,4 @@ printf 'Native fixtures: repository working directory\n'
 external_cwd="$(mktemp -d)"
 trap 'rmdir "$external_cwd"' EXIT
 printf 'Native fixtures: external working directory\n'
-(cd -- "$external_cwd" && "$verifier" "$module" && "$device_verifier" "$module" && "$audit_verifier" "$module" && "$verifier" "$module" 18)
+(cd -- "$external_cwd" && "$verifier" "$module" && "$device_verifier" "$module" && "$audit_verifier" "$module" && "$keyring_verifier" "$module" && "$verifier" "$module" 18)
