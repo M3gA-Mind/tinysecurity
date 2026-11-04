@@ -125,7 +125,12 @@ async fn fixture(allow: bool) -> Result<(Fixture, Consenter), Box<dyn std::error
     std::fs::create_dir_all(&dir)?;
     let mut init = initialization(&module, host_peer.as_str());
     init.peer = Some(Box::leak(host_peer.as_str().to_owned().into_boxed_str()));
-    let state = configure(Some(config(&dir)), None, &init)?.ok_or("state")?;
+    let mut state = configure(Some(config(&dir)), None, &init)?.ok_or("state")?;
+    Arc::get_mut(&mut state)
+        .and_then(|state| state.keyring.as_mut())
+        .ok_or("keyring")?
+        .consent
+        .ordinary = true;
     let mut service = super::super::service_for(
         Arc::new(std::sync::RwLock::new(tinysecurity::Policy::new(
             tinysecurity_bus::ModuleConfig::default(),
@@ -830,5 +835,34 @@ async fn stored_values_beyond_the_bound_and_oversized_passwords_are_refused()
                 .is_err()
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keyring_consent_without_a_serving_host_is_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Nothing serves KeyringConsent2, so consent fails closed before any backend access.
+    let clock: Arc<dyn tinysecurity::approval::Clock> = Arc::new(StepClock::default());
+    let dir = tempfile::tempdir()?;
+    let (state, _connection, _init) =
+        standalone(config(&dir.path().canonicalize()?), clock).await?;
+    let mut service = super::super::service_for(
+        Arc::new(std::sync::RwLock::new(tinysecurity::Policy::new(
+            tinysecurity_bus::ModuleConfig::default(),
+        )?)),
+        None,
+    );
+    service.crypto = Some(state);
+    let refusal = service
+        .keyring_access(keyring_request(KeyringOperation2::Get {
+            name: "user:token".into(),
+        }))
+        .await
+        .err()
+        .ok_or("expected refusal")?;
+    assert_eq!(
+        refusal.wire_name(),
+        "ai.tinyhumans.tinysecurity.Error.Unavailable"
+    );
     Ok(())
 }

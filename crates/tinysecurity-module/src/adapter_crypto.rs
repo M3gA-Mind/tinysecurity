@@ -58,6 +58,9 @@ struct Consent {
     connection: tinybus::Connection,
     peer: tinybus::BusName,
     timeout_ms: u32,
+    /// Mock-bus unit tests lack confidential module provenance; production never sets it.
+    #[cfg(test)]
+    ordinary: bool,
 }
 struct KeyringState {
     store: Arc<dyn SecretStore>,
@@ -246,6 +249,8 @@ fn build(config: &mut CryptoConfig2, init: &Initialization<'_>) -> BusResult<Bui
                     connection: init.connection.clone(),
                     peer: bus_peer.clone(),
                     timeout_ms: keyring.consent_timeout_ms,
+                    #[cfg(test)]
+                    ordinary: false,
                 },
             })
         })
@@ -479,22 +484,30 @@ async fn consent(
             callback_names2::KEYRING_CONSENT,
         )?
         .with_timeout(Duration::from_millis(u64::from(keyring.consent.timeout_ms)));
-    let reply: KeyringConsentResponse2 = proxy
-        .call(
-            callback_names2::CONSENT,
-            (KeyringConsentRequest2 {
-                caller: request.caller.clone(),
-                purpose: request.purpose.clone(),
-                access,
-                name: name.to_owned(),
-                timeout_ms: keyring.consent.timeout_ms,
-            },),
-        )
-        .await
-        .map_err(|error| match error {
-            tinybus::Error::Timeout { .. } => consent_error(KeyringConsentOutcome2::ConsentPending),
-            _ => consent_error(KeyringConsentOutcome2::Unavailable),
-        })?;
+    let args = (KeyringConsentRequest2 {
+        caller: request.caller.clone(),
+        purpose: request.purpose.clone(),
+        access,
+        name: name.to_owned(),
+        timeout_ms: keyring.consent.timeout_ms,
+    },);
+    // The host serves KeyringConsent2 as a confidential callback endpoint and
+    // refuses an ordinary call.
+    #[cfg(test)]
+    let confidential = !keyring.consent.ordinary;
+    #[cfg(not(test))]
+    let confidential = true;
+    let reply: tinybus::Result<KeyringConsentResponse2> = if confidential {
+        proxy
+            .call_confidential(callback_names2::CONSENT, args)
+            .await
+    } else {
+        proxy.call(callback_names2::CONSENT, args).await
+    };
+    let reply = reply.map_err(|error| match error {
+        tinybus::Error::Timeout { .. } => consent_error(KeyringConsentOutcome2::ConsentPending),
+        _ => consent_error(KeyringConsentOutcome2::Unavailable),
+    })?;
     match reply.outcome {
         KeyringConsentOutcome2::Allowed => Ok(()),
         outcome => Err(consent_error(outcome)),
