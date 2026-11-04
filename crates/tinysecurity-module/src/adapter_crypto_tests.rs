@@ -125,7 +125,12 @@ async fn fixture(allow: bool) -> Result<(Fixture, Consenter), Box<dyn std::error
     std::fs::create_dir_all(&dir)?;
     let mut init = initialization(&module, host_peer.as_str());
     init.peer = Some(Box::leak(host_peer.as_str().to_owned().into_boxed_str()));
-    let state = configure(Some(config(&dir)), None, &init)?.ok_or("state")?;
+    let mut state = configure(Some(config(&dir)), None, &init)?.ok_or("state")?;
+    Arc::get_mut(&mut state)
+        .and_then(|state| state.keyring.as_mut())
+        .ok_or("keyring")?
+        .consent
+        .ordinary = true;
     let mut service = super::super::service_for(
         Arc::new(std::sync::RwLock::new(tinysecurity::Policy::new(
             tinysecurity_bus::ModuleConfig::default(),
