@@ -1109,3 +1109,14 @@ fn ordinary_authority_samples_current_clock_only_inside_physical_gate() -> TestR
     assert!(!reg.state.lock().map_err(|_| "P03")?.closed, "P04");
     Ok(())
 }
+
+#[test]
+fn neutral_registry_starts_empty_and_admits_runtime_scopes() -> Result<()> {
+    let clock = Arc::new(Clock(AtomicU64::new(0)));
+    let registry = Registry::new(vec![], ":1.1", 1, Limits::default(), clock)?;
+    // Nothing is registered, so no authority can be reserved under any id.
+    assert!(registry.revoke_scope("a").is_err());
+    registry.register_scope(registration("a"), 1)?;
+    registry.revoke_scope("a")?;
+    Ok(())
+}
