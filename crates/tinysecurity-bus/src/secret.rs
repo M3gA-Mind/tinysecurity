@@ -55,6 +55,30 @@ pub struct SecretRegistration2 {
 pub struct RegisterSecretScopeRequest2 {
     /// Immutable secret registration; the module resolves the approval scope itself.
     pub registration: SecretRegistration2,
+    /// Optional routine cipher owned by this registration alone (contract 2.1).
+    ///
+    /// Absent, the request keeps its 2.0 wire form. Present, the module binds a
+    /// cipher, delivery slots and audit stream to this registration only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher: Option<SecretScopeCipher2>,
+}
+/// Routine cipher of one runtime `ConfigUserMaster` registration (contract 2.1).
+///
+/// It names no registration and no subject: the module binds it to the enclosing
+/// registration and audits it under that registration's own approval subject.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretScopeCipher2 {
+    /// Opaque consumer identity, unique to this registration for the process lifetime.
+    pub consumer_id: String,
+    /// Immutable encryption setting.
+    pub enabled: bool,
+    /// Physical receiver slots of this registration alone, in 1..=128.
+    pub slots: u16,
+    /// Fixed confidential callback timeout, 1..=30000 milliseconds.
+    pub timeout_ms: u32,
+    /// Opaque audit stream of the registration's subject; one stream per subject.
+    pub audit_stream_id: String,
 }
 /// Safe confirmation of one active secret registration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
