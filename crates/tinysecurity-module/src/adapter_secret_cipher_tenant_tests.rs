@@ -441,7 +441,7 @@ impl Control {
             assert_eq!(
                 expected.get(&key).map(String::as_str),
                 arguments["policy"].as_str(),
-                "cipher audit carries its own registration's subject, stream and policy"
+                "cipher audit carries its own registration's subject, stream and policy: {key:?}"
             );
             *seen.entry(key).or_insert(0) += 1;
         }
