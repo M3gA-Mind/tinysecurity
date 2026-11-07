@@ -144,7 +144,11 @@ impl Control {
         Ok(())
     }
     /// Acquire a tenant's master: it still takes an authenticated human decision.
-    async fn tenant_master(&self, proxy: &tinybus::Proxy, tenant: &Tenant) -> tinybus::Result<String> {
+    async fn tenant_master(
+        &self,
+        proxy: &tinybus::Proxy,
+        tenant: &Tenant,
+    ) -> tinybus::Result<String> {
         let request = SecretRequest2 {
             registration_id: tenant.registration_id(),
             call_id: format!("tenant-{}-master", tenant.index),
@@ -305,32 +309,53 @@ impl Control {
     async fn tenant_registration(&self, proxy: &tinybus::Proxy) -> tinybus::Result<()> {
         self.register_tenants(proxy).await?;
         let [one, _] = &TENANTS;
-        assert_eq!(self.register(proxy, &one.request()).await?.registration_id, one.registration_id());
+        assert_eq!(
+            self.register(proxy, &one.request()).await?.registration_id,
+            one.registration_id()
+        );
         let mut resized = one.request();
         if let Some(cipher) = &mut resized.cipher {
             cipher.slots = 2;
         }
-        assert!(self.register(proxy, &resized).await.is_err(), "a live cipher is immutable");
-        let without = RegisterSecretScopeRequest2 { cipher: None, ..one.request() };
-        assert!(self.register(proxy, &without).await.is_err(), "a cipher cannot be dropped");
+        assert!(
+            self.register(proxy, &resized).await.is_err(),
+            "a live cipher is immutable"
+        );
+        let without = RegisterSecretScopeRequest2 {
+            cipher: None,
+            ..one.request()
+        };
+        assert!(
+            self.register(proxy, &without).await.is_err(),
+            "a cipher cannot be dropped"
+        );
         self.register_approval(proxy, &PROBE).await?;
         let mut shared = PROBE.request();
         if let Some(cipher) = &mut shared.cipher {
             cipher.consumer_id = one.consumer_id();
         }
-        assert!(self.register(proxy, &shared).await.is_err(), "a consumer serves one registration");
+        assert!(
+            self.register(proxy, &shared).await.is_err(),
+            "a consumer serves one registration"
+        );
         let mut forked = PROBE.request();
         if let Some(cipher) = &mut forked.cipher {
             cipher.audit_stream_id = "3f".repeat(16);
         }
-        assert!(self.register(proxy, &forked).await.is_err(), "one stream per subject");
+        assert!(
+            self.register(proxy, &forked).await.is_err(),
+            "one stream per subject"
+        );
         let mut invalid = PROBE.request();
         if let Some(cipher) = &mut invalid.cipher {
             cipher.slots = 0;
         }
         assert!(self.register(proxy, &invalid).await.is_err());
         let secret = self.service.secret.as_ref().ok_or_else(denied)?;
-        assert!(secret.registration_id(&PROBE.registration_id()).is_err(), "refusals register nothing");
+        assert!(
+            secret.registration_id(&PROBE.registration_id()).is_err(),
+            "refusals register nothing"
+        );
         assert!(self.register(proxy, &PROBE.request()).await?.active);
         Ok(())
     }
@@ -340,10 +365,20 @@ impl Control {
         let [one, two] = &TENANTS;
         let first = self.tenant_master(proxy, one).await?;
         let second = self.tenant_master(proxy, two).await?;
-        let ciphertext = self.encrypt(proxy, one, &first, "seal", b"tenant-one-secret").await?;
-        assert!(self.decrypt(proxy, two, &second, "open", &ciphertext).await.is_err());
+        let ciphertext = self
+            .encrypt(proxy, one, &first, "seal", b"tenant-one-secret")
+            .await?;
+        assert!(
+            self.decrypt(proxy, two, &second, "open", &ciphertext)
+                .await
+                .is_err()
+        );
         assert!(!self.delivered_to(two)?);
-        assert_eq!(self.decrypt(proxy, one, &first, "open", &ciphertext).await?, b"tenant-one-secret");
+        assert_eq!(
+            self.decrypt(proxy, one, &first, "open", &ciphertext)
+                .await?,
+            b"tenant-one-secret"
+        );
         Ok(())
     }
     /// Mode 42: no tenant takes another's pending entry or master grant.
@@ -354,11 +389,20 @@ impl Control {
         let second = self.tenant_master(proxy, two).await?;
         let owned = Self::cipher_request(one, &first, "seal", SecretCipherKind2::Encrypt, b"one");
         let pending = self.evaluate(proxy, &owned).await?;
-        let foreign = Self::cipher_request(two, &second, "seal", SecretCipherKind2::Encrypt, b"one");
-        assert!(self.execute(proxy, foreign, pending.pending_id.clone()).await.is_err());
+        let foreign =
+            Self::cipher_request(two, &second, "seal", SecretCipherKind2::Encrypt, b"one");
+        assert!(
+            self.execute(proxy, foreign, pending.pending_id.clone())
+                .await
+                .is_err()
+        );
         let stolen = Self::cipher_request(two, &first, "steal", SecretCipherKind2::Encrypt, b"x");
-        assert!(self.evaluate(proxy, &stolen).await.is_err(), "a master grant is its registration's");
-        let mut crossed = Self::cipher_request(one, &second, "cross", SecretCipherKind2::Encrypt, b"x");
+        assert!(
+            self.evaluate(proxy, &stolen).await.is_err(),
+            "a master grant is its registration's"
+        );
+        let mut crossed =
+            Self::cipher_request(one, &second, "cross", SecretCipherKind2::Encrypt, b"x");
         crossed.registration_id = one.registration_id();
         assert!(self.evaluate(proxy, &crossed).await.is_err());
         // The refused takeover left the owner's pending intact.
@@ -377,10 +421,13 @@ impl Control {
         let engine = self.service.approvals.as_ref().ok_or_else(denied)?;
         for tenant in &TENANTS {
             let handle = self.tenant_master(proxy, tenant).await?;
-            self.encrypt(proxy, tenant, &handle, "audited", b"audited").await?;
+            self.encrypt(proxy, tenant, &handle, "audited", b"audited")
+                .await?;
             expected.insert(
                 (tenant.subject().user, tenant.stream_id()),
-                engine.durable_policy_ref(&tenant.scope_id()).map_err(|_| denied())?,
+                engine
+                    .durable_policy_ref(&tenant.scope_id())
+                    .map_err(|_| denied())?,
             );
         }
         let mut seen = BTreeMap::new();
@@ -408,21 +455,44 @@ impl Control {
         let [one, two] = &TENANTS;
         let first = self.tenant_master(proxy, one).await?;
         let second = self.tenant_master(proxy, two).await?;
-        let sealed_one = self.encrypt(proxy, one, &first, "seal", b"one-plain").await?;
-        let sealed_two = self.encrypt(proxy, two, &second, "seal", b"two-plain").await?;
+        let sealed_one = self
+            .encrypt(proxy, one, &first, "seal", b"one-plain")
+            .await?;
+        let sealed_two = self
+            .encrypt(proxy, two, &second, "seal", b"two-plain")
+            .await?;
         *self.state.failing_consumer.lock().map_err(|_| denied())? = Some(two.consumer_id());
-        assert!(self.decrypt(proxy, two, &second, "open", &sealed_two).await.is_err());
+        assert!(
+            self.decrypt(proxy, two, &second, "open", &sealed_two)
+                .await
+                .is_err()
+        );
         *self.state.failing_consumer.lock().map_err(|_| denied())? = None;
         // Tenant two's only slot stays uncertain for the process lifetime.
-        assert!(self.decrypt(proxy, two, &second, "retry", &sealed_two).await.is_err());
-        assert_eq!(self.decrypt(proxy, one, &first, "open", &sealed_one).await?, b"one-plain");
-        assert_eq!(self.decrypt(proxy, one, &first, "again", &sealed_one).await?, b"one-plain");
+        assert!(
+            self.decrypt(proxy, two, &second, "retry", &sealed_two)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            self.decrypt(proxy, one, &first, "open", &sealed_one)
+                .await?,
+            b"one-plain"
+        );
+        assert_eq!(
+            self.decrypt(proxy, one, &first, "again", &sealed_one)
+                .await?,
+            b"one-plain"
+        );
         Ok(())
     }
     /// Mode 45: after a neutral boot, runtime tenants work end to end and
     /// retiring one leaves the other untouched.
     async fn tenant_runtime_lifecycle(&self, proxy: &tinybus::Proxy) -> tinybus::Result<()> {
-        assert!(self.service.secret_cipher.is_none(), "neutral boot has no static cipher");
+        assert!(
+            self.service.secret_cipher.is_none(),
+            "neutral boot has no static cipher"
+        );
         let [one, two] = &TENANTS;
         let early = Self::cipher_request(one, "none", "early", SecretCipherKind2::Encrypt, b"x");
         assert!(self.evaluate(proxy, &early).await.is_err());
@@ -430,17 +500,28 @@ impl Control {
         let first = self.tenant_master(proxy, one).await?;
         let second = self.tenant_master(proxy, two).await?;
         for (tenant, handle) in [(one, &first), (two, &second)] {
-            let sealed = self.encrypt(proxy, tenant, handle, "seal", b"round-trip").await?;
+            let sealed = self
+                .encrypt(proxy, tenant, handle, "seal", b"round-trip")
+                .await?;
             assert!(sealed.starts_with("enc2:"));
-            assert_eq!(self.decrypt(proxy, tenant, handle, "open", &sealed).await?, b"round-trip");
+            assert_eq!(
+                self.decrypt(proxy, tenant, handle, "open", &sealed).await?,
+                b"round-trip"
+            );
         }
         let _: ApprovalScopeReceipt2 = proxy
             .call(
                 names::methods::RETIRE_APPROVAL_SCOPE2,
-                (RetireApprovalScopeRequest2 { scope_id: one.scope_id() },),
+                (RetireApprovalScopeRequest2 {
+                    scope_id: one.scope_id(),
+                },),
             )
             .await?;
-        assert!(self.encrypt(proxy, one, &first, "retired", b"x").await.is_err());
+        assert!(
+            self.encrypt(proxy, one, &first, "retired", b"x")
+                .await
+                .is_err()
+        );
         self.encrypt(proxy, two, &second, "survivor", b"x").await?;
         Ok(())
     }
@@ -480,7 +561,11 @@ async fn tenant_fixture(test: &str, mode: u32) -> TestResult {
         .await?
         .ok_or("fixture peer")?;
     let result: serde_json::Value = client
-        .proxy(peer.as_str(), "/fixture", "ai.tinyhumans.tinysecurity.SecretFixture")?
+        .proxy(
+            peer.as_str(),
+            "/fixture",
+            "ai.tinyhumans.tinysecurity.SecretFixture",
+        )?
         .with_timeout(std::time::Duration::from_secs(10))
         .call("Exercise", ())
         .await
@@ -491,15 +576,27 @@ async fn tenant_fixture(test: &str, mode: u32) -> TestResult {
 }
 #[tokio::test]
 async fn runtime_registration_accepts_a_registration_owned_cipher() -> TestResult {
-    tenant_fixture("runtime_registration_accepts_a_registration_owned_cipher", 40).await
+    tenant_fixture(
+        "runtime_registration_accepts_a_registration_owned_cipher",
+        40,
+    )
+    .await
 }
 #[tokio::test]
 async fn tenant_ciphertext_never_opens_under_another_tenants_master() -> TestResult {
-    tenant_fixture("tenant_ciphertext_never_opens_under_another_tenants_master", 41).await
+    tenant_fixture(
+        "tenant_ciphertext_never_opens_under_another_tenants_master",
+        41,
+    )
+    .await
 }
 #[tokio::test]
 async fn tenant_cannot_take_another_tenants_pending_entry_or_grant() -> TestResult {
-    tenant_fixture("tenant_cannot_take_another_tenants_pending_entry_or_grant", 42).await
+    tenant_fixture(
+        "tenant_cannot_take_another_tenants_pending_entry_or_grant",
+        42,
+    )
+    .await
 }
 #[tokio::test]
 async fn each_registration_audits_under_its_own_subject() -> TestResult {
@@ -511,5 +608,9 @@ async fn one_tenants_failed_delivery_leaves_the_other_working() -> TestResult {
 }
 #[tokio::test]
 async fn runtime_tenants_work_after_a_neutral_boot_and_retire_alone() -> TestResult {
-    tenant_fixture("runtime_tenants_work_after_a_neutral_boot_and_retire_alone", 45).await
+    tenant_fixture(
+        "runtime_tenants_work_after_a_neutral_boot_and_retire_alone",
+        45,
+    )
+    .await
 }

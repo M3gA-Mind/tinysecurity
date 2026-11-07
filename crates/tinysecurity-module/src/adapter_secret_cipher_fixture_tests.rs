@@ -50,7 +50,12 @@ impl Consumer {
         if !registered_consumer(self.0.mode, &identity) || identity.generation != 1 {
             return Err(denied());
         }
-        if self.0.failing_consumer.lock().map_err(|_| denied())?.as_ref()
+        if self
+            .0
+            .failing_consumer
+            .lock()
+            .map_err(|_| denied())?
+            .as_ref()
             == Some(&identity.consumer_id)
         {
             return Err(denied());

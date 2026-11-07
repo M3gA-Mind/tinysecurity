@@ -153,10 +153,7 @@ impl Backend {
                     .map(|tenant| (tenant.backend_id(), tenant.key()))
                     .collect()
             } else if mode >= 20 || matches!(mode, 0 | 17) {
-                BTreeMap::from([(
-                    "c".repeat(32),
-                    Zeroizing::new("AA".repeat(32).into_bytes()),
-                )])
+                BTreeMap::from([("c".repeat(32), Zeroizing::new("AA".repeat(32).into_bytes()))])
             } else {
                 BTreeMap::new()
             }),
@@ -385,12 +382,16 @@ impl Secrets {
                         encoded: vec![b' '; 4097],
                     }
                 } else {
-                    self.0.targets.lock().map_err(|_| denied())?.get(&backend).map_or(
-                        SecretBackendLoadStatus2::Absent,
-                        |v| SecretBackendLoadStatus2::Present {
-                            encoded: v.to_vec(),
-                        },
-                    )
+                    self.0
+                        .targets
+                        .lock()
+                        .map_err(|_| denied())?
+                        .get(&backend)
+                        .map_or(SecretBackendLoadStatus2::Absent, |v| {
+                            SecretBackendLoadStatus2::Present {
+                                encoded: v.to_vec(),
+                            }
+                        })
                 }
             }
             SecretPhase2::LegacyRead
