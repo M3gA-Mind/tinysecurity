@@ -424,29 +424,35 @@ impl Control {
             self.encrypt(proxy, tenant, &handle, "audited", b"audited")
                 .await?;
             expected.insert(
-                (tenant.subject().user, tenant.stream_id()),
+                tenant.stream_id(),
                 engine
                     .durable_policy_ref(&tenant.scope_id())
                     .map_err(|_| denied())?,
             );
         }
-        let mut seen = BTreeMap::new();
+        // The sink sees a pseudonymized subject: one distinct subject per stream.
+        let mut seen: BTreeMap<String, (SubjectScope, usize)> = BTreeMap::new();
         for batch in self.state.batches.lock().map_err(|_| denied())?.iter() {
             if batch.events[0].attribution != "native-config-cipher" {
                 continue;
             }
             let arguments: serde_json::Value =
                 serde_json::from_str(&batch.events[0].arguments_json)?;
-            let key = (batch.scope.user.clone(), batch.stream_id.clone());
             assert_eq!(
-                expected.get(&key).map(String::as_str),
+                expected.get(&batch.stream_id).map(String::as_str),
                 arguments["policy"].as_str(),
-                "cipher audit carries its own registration's subject, stream and policy: {key:?}"
+                "cipher audit uses its own registration's stream and policy"
             );
-            *seen.entry(key).or_insert(0) += 1;
+            let entry = seen
+                .entry(batch.stream_id.clone())
+                .or_insert_with(|| (batch.scope.clone(), 0));
+            assert_eq!(entry.0, batch.scope, "one subject per stream");
+            entry.1 += 1;
         }
-        assert_eq!(seen.len(), 2);
-        assert!(seen.values().all(|count| *count >= 3));
+        let subjects: Vec<_> = seen.values().map(|(subject, _)| subject).collect();
+        assert_eq!(subjects.len(), 2);
+        assert_ne!(subjects[0], subjects[1]);
+        assert!(seen.values().all(|(_, count)| *count >= 3));
         Ok(())
     }
     /// Mode 44: a tenant's failed delivery leaves the other tenant working.
