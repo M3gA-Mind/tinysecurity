@@ -334,9 +334,10 @@ impl NativeCipherConsumer for Broker {
 }
 pub(super) struct CipherState {
     config: SecretCipherConfig2,
+    /// The runtime request this cipher was registered with; `None` for the static one.
+    requested: Option<SecretScopeCipher2>,
     owner: CipherOwner,
     broker: Arc<Broker>,
-    pending: Mutex<BTreeMap<String, Pending>>,
 }
 impl CipherState {
     #[cfg(test)]
@@ -371,6 +372,70 @@ pub(super) fn configured(
         .map(|config| create(config, connection, peer, secret, engine, audit))
         .transpose()
 }
+fn valid_config(config: &SecretCipherConfig2) -> bool {
+    opaque_id(&config.registration_id)
+        && opaque_id(&config.consumer_id)
+        && (1..=128).contains(&config.slots)
+        && (1..=30000).contains(&config.timeout_ms)
+}
+/// Everything one cipher is built from, already checked by its caller.
+struct Parts<'a> {
+    config: SecretCipherConfig2,
+    requested: Option<SecretScopeCipher2>,
+    connection: &'a tinybus::Connection,
+    peer: tinybus::BusName,
+    secret: Arc<SecretState>,
+    scope: tinysecurity_bus::ApprovalScope2,
+    engine: &'a tinysecurity::approval::Engine,
+    audit: Arc<AuditClient>,
+    registry_source: Arc<AuditClient>,
+    slots: Slots,
+}
+fn build(parts: Parts<'_>) -> tinybus::Result<Arc<CipherState>> {
+    let broker = Arc::new(Broker {
+        connection: parts.connection.clone(),
+        peer: parts.peer,
+        config: parts.config.clone(),
+        secret: parts.secret.clone(),
+        audit: parts.audit,
+        registry_source: parts.registry_source,
+        subject: parts.scope.subject.clone(),
+        audit_binding: Mutex::new((
+            parts
+                .engine
+                .durable_scope(&parts.scope.scope_id)
+                .map_err(|_| denied())?,
+            parts
+                .engine
+                .durable_policy_ref(&parts.scope.scope_id)
+                .map_err(|_| denied())?,
+        )),
+        slots: parts.slots,
+        contexts: Mutex::new(BTreeMap::new()),
+    });
+    let owner = CipherOwner::new(
+        parts.secret.cipher_registry(),
+        CipherConfig {
+            consumer: parts.config.consumer_id.clone(),
+            enabled: parts.config.enabled,
+        },
+        broker.clone(),
+    )
+    .map_err(|_| denied())?;
+    Ok(Arc::new(CipherState {
+        config: parts.config,
+        requested: parts.requested,
+        owner,
+        broker,
+    }))
+}
+fn unique_peer(peer: Option<&str>) -> tinybus::Result<tinybus::BusName> {
+    let peer = peer.ok_or_else(denied)?.parse::<tinybus::BusName>()?;
+    if !peer.is_unique() {
+        return Err(denied());
+    }
+    Ok(peer)
+}
 pub(super) fn create(
     config: SecretCipherConfig2,
     connection: &tinybus::Connection,
@@ -379,67 +444,185 @@ pub(super) fn create(
     engine: Option<&Arc<tinysecurity::approval::Engine>>,
     audit: Option<&Arc<AuditClient>>,
 ) -> tinybus::Result<Arc<CipherState>> {
-    if !opaque_id(&config.registration_id)
-        || !opaque_id(&config.consumer_id)
-        || !(1..=128).contains(&config.slots)
-        || !(1..=30000).contains(&config.timeout_ms)
-    {
+    if !valid_config(&config) {
         return Err(denied());
     }
     let secret = secret.ok_or_else(denied)?.clone();
     let scope = secret.cipher_scope(&config.registration_id)?;
     let engine = engine.ok_or_else(denied)?;
     let audit = audit.ok_or_else(denied)?.clone();
+    // Init-only: the static cipher audits under the init subject and stream.
     if !audit.required() || audit.scope() != &scope.subject {
         return Err(denied());
     }
-    let peer = peer.ok_or_else(denied)?.parse::<tinybus::BusName>()?;
-    if !peer.is_unique() {
+    let peer = unique_peer(peer)?;
+    let slots = Arc::new(Mutex::new(vec![None; usize::from(config.slots)]));
+    build(Parts {
+        config,
+        requested: None,
+        connection,
+        peer,
+        secret,
+        scope,
+        engine,
+        audit: audit.clone(),
+        registry_source: audit,
+        slots,
+    })
+}
+/// Inputs of one runtime cipher request, checked before the secret registers.
+pub(super) struct RuntimeRequest<'a> {
+    pub(super) registration_id: &'a str,
+    pub(super) approval_scope_id: &'a str,
+    pub(super) cipher: &'a SecretScopeCipher2,
+    pub(super) engine: &'a tinysecurity::approval::Engine,
+    pub(super) audit: Option<&'a Arc<AuditClient>>,
+    pub(super) static_cipher: Option<&'a CipherState>,
+}
+impl RuntimeRequest<'_> {
+    fn config(&self) -> SecretCipherConfig2 {
+        SecretCipherConfig2 {
+            registration_id: self.registration_id.into(),
+            consumer_id: self.cipher.consumer_id.clone(),
+            enabled: self.cipher.enabled,
+            slots: self.cipher.slots,
+            timeout_ms: self.cipher.timeout_ms,
+        }
+    }
+    /// Refuse a request that could not become a working, isolated cipher, before
+    /// anything registers: shape, consumer ownership and the one stream per subject.
+    pub(super) fn check(&self) -> tinybus::Result<AuditClient> {
+        let config = self.config();
+        let audit = self.audit.ok_or_else(denied)?;
+        if !valid_config(&config)
+            || !opaque_id(&self.cipher.audit_stream_id)
+            || !audit.required()
+            || runtime()
+                .lock()
+                .map_err(|_| denied())?
+                .contains_key(self.registration_id)
+        {
+            return Err(denied());
+        }
+        if let Some(fixed) = self.static_cipher
+            && (fixed.config.consumer_id == config.consumer_id
+                || fixed.config.registration_id == config.registration_id)
+        {
+            return Err(denied());
+        }
+        if let Some(bound) = consumers()
+            .lock()
+            .map_err(|_| denied())?
+            .get(&config.consumer_id)
+            && (bound.registration != self.registration_id
+                || bound.slots.lock().map_err(|_| denied())?.len() != usize::from(config.slots))
+        {
+            return Err(denied());
+        }
+        let scope = self
+            .engine
+            .scope_snapshot(self.approval_scope_id)
+            .map_err(|_| denied())?;
+        // A runtime approval scope already owns a stream: its cipher must use it.
+        // An init scope shares the init stream, which only the init subject may use.
+        match self
+            .engine
+            .scope_audit_stream(self.approval_scope_id)
+            .map_err(|_| denied())?
+        {
+            Some(stream) if stream == self.cipher.audit_stream_id => {}
+            None if &scope.subject == audit.scope() => {}
+            _ => return Err(denied()),
+        }
+        audit.for_subject(&scope.subject, &self.cipher.audit_stream_id)
+    }
+}
+/// Create and publish the cipher of one freshly registered runtime secret scope.
+pub(super) fn register(
+    request: &RuntimeRequest<'_>,
+    secret: &Arc<SecretState>,
+) -> tinybus::Result<()> {
+    let audit = Arc::new(request.check()?);
+    let registry_source = request.audit.ok_or_else(denied)?.clone();
+    let config = request.config();
+    let scope = secret.cipher_scope(request.registration_id)?;
+    let peer = unique_peer(Some(secret.peer()))?;
+    let mut consumers = consumers().lock().map_err(|_| denied())?;
+    let slots = consumers.get(&config.consumer_id).map_or_else(
+        || Arc::new(Mutex::new(vec![None; usize::from(config.slots)])),
+        |bound| bound.slots.clone(),
+    );
+    let state = build(Parts {
+        config: config.clone(),
+        requested: Some(request.cipher.clone()),
+        connection: secret.connection(),
+        peer,
+        secret: secret.clone(),
+        scope,
+        engine: request.engine,
+        audit,
+        registry_source,
+        slots: slots.clone(),
+    })?;
+    let mut active = runtime().lock().map_err(|_| denied())?;
+    if active.contains_key(request.registration_id) {
         return Err(denied());
     }
-    let broker = Arc::new(Broker {
-        connection: connection.clone(),
-        peer,
-        config: config.clone(),
-        secret: secret.clone(),
-        audit,
-        subject: scope.subject.clone(),
-        audit_binding: Mutex::new((
-            engine
-                .durable_scope(&scope.scope_id)
-                .map_err(|_| denied())?,
-            engine
-                .durable_policy_ref(&scope.scope_id)
-                .map_err(|_| denied())?,
-        )),
-        slots: Mutex::new(vec![None; usize::from(config.slots)]),
-        contexts: Mutex::new(BTreeMap::new()),
-    });
-    let owner = CipherOwner::new(
-        secret.cipher_registry(),
-        CipherConfig {
-            consumer: config.consumer_id.clone(),
-            enabled: config.enabled,
+    consumers.insert(
+        config.consumer_id,
+        ConsumerBinding {
+            registration: request.registration_id.into(),
+            slots,
         },
-        broker.clone(),
-    )
-    .map_err(|_| denied())?;
-    Ok(Arc::new(CipherState {
-        config,
-        owner,
-        broker,
-        pending: Mutex::new(BTreeMap::new()),
-    }))
+    );
+    active.insert(request.registration_id.into(), state);
+    Ok(())
+}
+/// Whether a repeated registration asks for exactly the cipher it already has.
+pub(super) fn matches_runtime(
+    registration: &str,
+    cipher: Option<&SecretScopeCipher2>,
+) -> tinybus::Result<bool> {
+    let active = runtime().lock().map_err(|_| denied())?;
+    Ok(active
+        .get(registration)
+        .and_then(|state| state.requested.as_ref())
+        == cipher)
+}
+/// Drop the ciphers and pending work of retired registrations. Their consumers
+/// stay bound, so uncertain slots stay occupied for the process lifetime.
+pub(super) fn retire(registrations: &[String]) {
+    if let Ok(mut active) = runtime().lock() {
+        active.retain(|id, _| !registrations.contains(id));
+    }
+    if let Ok(mut inventory) = pending().lock() {
+        inventory.retain(|_, work| !registrations.contains(&work.request.registration_id));
+    }
 }
 
 pub(super) fn activate(state: Option<Arc<CipherState>>) -> tinybus::Result<()> {
+    if let Some(state) = &state {
+        // Reserve the static consumer so no runtime registration can claim it.
+        let mut consumers = consumers().lock().map_err(|_| denied())?;
+        if consumers.contains_key(&state.config.consumer_id) {
+            return Err(denied());
+        }
+        consumers.insert(
+            state.config.consumer_id.clone(),
+            ConsumerBinding {
+                registration: state.config.registration_id.clone(),
+                slots: state.broker.slots.clone(),
+            },
+        );
+    }
     CIPHER.set(state).map_err(|_| denied())
 }
 pub(super) fn close_pending() {
-    if let Some(Some(state)) = CIPHER.get()
-        && let Ok(mut pending) = state.pending.lock()
-    {
+    if let Ok(mut pending) = pending().lock() {
         pending.clear();
+    }
+    if let Ok(mut active) = runtime().lock() {
+        active.clear();
     }
     // Physical uncertainty is deliberately not cleared by close or generation.
 }
@@ -464,28 +647,34 @@ pub(super) fn refresh_approval_scope(
     Ok(())
 }
 type Inventory<'a> = MutexGuard<'a, BTreeMap<String, Pending>>;
-pub(super) fn prepare_generation() -> tinybus::Result<Option<Inventory<'static>>> {
-    CIPHER
-        .get()
-        .and_then(Option::as_ref)
-        .map(|state| state.pending.lock().map_err(|_| denied()))
-        .transpose()
+pub(super) fn prepare_generation() -> tinybus::Result<Inventory<'static>> {
+    pending().lock().map_err(|_| denied())
 }
 impl PolicyService {
+    /// The cipher of `registration`: the static one, or that registration's own.
+    fn cipher_for(&self, registration: &str) -> tinybus::Result<Arc<CipherState>> {
+        if let Some(state) = &self.secret_cipher
+            && state.config.registration_id == registration
+        {
+            return Ok(state.clone());
+        }
+        runtime()
+            .lock()
+            .map_err(|_| denied())?
+            .get(registration)
+            .cloned()
+            .ok_or_else(denied)
+    }
     pub(super) async fn cipher_evaluate(
         &self,
         request: EvaluateSecretCipherRequest2,
     ) -> tinybus::Result<SecretCipherPending2> {
         let mut input = Input(request.request);
-        let state = self.secret_cipher.as_ref().ok_or_else(denied)?;
-        state
-            .pending
+        let state = self.cipher_for(&input.0.registration_id)?;
+        pending()
             .lock()
             .map_err(|_| denied())?
-            .retain(|_, pending| state.owner.validate_pending(&pending.work).is_ok());
-        if input.0.registration_id != state.config.registration_id {
-            return Err(denied());
-        }
+            .retain(|_, pending| pending.state.owner.validate_pending(&pending.work).is_ok());
         let generation = self.read()?.info().generation;
         let metadata = metadata(&input.0);
         let work = state
@@ -503,14 +692,22 @@ impl PolicyService {
         let intent = intent?;
         intent.verify(&operation, "intent", generation)?;
         let pending_id = tinysecurity::audit::opaque_id().map_err(|_| denied())?;
-        let mut inventory = state.pending.lock().map_err(|_| denied())?;
-        inventory.retain(|_, p| state.owner.validate_pending(&p.work).is_ok());
+        let mut inventory = pending().lock().map_err(|_| denied())?;
+        inventory.retain(|_, p| p.state.owner.validate_pending(&p.work).is_ok());
         // Acquiring this lock serializes final admission with generation activation.
         state.owner.validate_pending(&work).map_err(|_| denied())?;
+        // A retired registration loses its cipher; never admit work for it.
+        if !self
+            .cipher_for(&metadata.registration_id)
+            .is_ok_and(|current| Arc::ptr_eq(&current, &state))
+        {
+            return Err(denied());
+        }
         if inventory
             .insert(
                 pending_id.clone(),
                 Pending {
+                    state: state.clone(),
                     request: metadata,
                     work,
                     intent,
@@ -530,14 +727,21 @@ impl PolicyService {
         request: ExecuteSecretCipherRequest2,
     ) -> tinybus::Result<SecretCipherResponse2> {
         let input = Input(request.request);
-        let state = self.secret_cipher.as_ref().ok_or_else(denied)?;
+        let state = self.cipher_for(&input.0.registration_id)?;
         let generation = self.read()?.info().generation;
-        let pending = state
-            .pending
-            .lock()
-            .map_err(|_| denied())?
-            .remove(&request.pending_id)
-            .ok_or_else(denied)?;
+        let pending = {
+            let mut inventory = pending().lock().map_err(|_| denied())?;
+            // Check ownership before removal: another registration's request
+            // can neither execute nor discard this pending.
+            let owned = inventory.get(&request.pending_id).is_some_and(|pending| {
+                Arc::ptr_eq(&pending.state, &state)
+                    && pending.request.registration_id == input.0.registration_id
+            });
+            if !owned {
+                return Err(denied());
+            }
+            inventory.remove(&request.pending_id).ok_or_else(denied)?
+        };
         if pending.request != metadata(&input.0) || !pending.work.matches_input(&input.0.input) {
             return Err(denied());
         }

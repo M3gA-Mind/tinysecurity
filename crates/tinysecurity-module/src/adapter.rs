@@ -1502,15 +1502,39 @@ impl PolicyService {
         // The TinyBus interface is asynchronous; registration itself only
         // updates the already-live in-process registries.
         std::future::ready(()).await;
-        self.secret
+        let secret = self
+            .secret
             .as_ref()
-            .ok_or_else(|| tinybus::Error::failed("secret authority unavailable"))?
-            .register_scope(
-                request,
-                self.approvals
-                    .as_ref()
-                    .ok_or_else(|| tinybus::Error::failed("approval unavailable"))?,
-            )
+            .ok_or_else(|| tinybus::Error::failed("secret authority unavailable"))?;
+        let engine = self
+            .approvals
+            .as_ref()
+            .ok_or_else(|| tinybus::Error::failed("approval unavailable"))?;
+        let registration_id = request.registration.registration_id.clone();
+        let scope_id = request.registration.approval_scope_id.clone();
+        let requested = request.cipher.clone();
+        let runtime = requested.as_ref().map(|cipher| cipher::RuntimeRequest {
+            registration_id: &registration_id,
+            approval_scope_id: &scope_id,
+            cipher,
+            engine,
+            audit: self.audit.as_ref(),
+            static_cipher: self.secret_cipher.as_deref(),
+        });
+        let (receipt, created) = secret.register_scope(request, engine, || {
+            runtime
+                .as_ref()
+                .map_or(Ok(()), |runtime| runtime.check().map(drop))
+        })?;
+        if created
+            && let Some(runtime) = &runtime
+            && let Err(error) = cipher::register(runtime, secret)
+        {
+            // Never leave a master registered without the cipher it asked for.
+            secret.retire_approval_scope(&scope_id)?;
+            return Err(error);
+        }
+        Ok(receipt)
     }
     // Private host-only registration. The module resolves the live approval
     // scope and derives all pairing and master bindings from trusted state.
@@ -2199,15 +2223,13 @@ fn activate_authorities(
     generation: u64,
     publish: impl FnOnce() -> BusResult<()>,
 ) -> BusResult<()> {
-    let cipher_prepared = cipher::prepare_generation()?;
+    let mut cipher_prepared = cipher::prepare_generation()?;
     let secret_prepared = secret::prepare_generation(secret, generation)?;
     device::transition(device, device_limits, generation, publish)?;
     if let Some(prepared) = secret_prepared {
         prepared.commit();
     }
-    if let Some(mut pending) = cipher_prepared {
-        pending.clear();
-    }
+    cipher_prepared.clear();
     Ok(())
 }
 fn publish_policy_generation(

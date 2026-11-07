@@ -222,26 +222,9 @@ impl AuditClient {
         {
             return denied();
         }
-        let mut config = self.config.clone();
-        config.scope = request.subject.clone();
-        config.stream_id = request.stream_id.clone();
-        // Subjects other than the init one always forward to the host sink.
-        config.native_path = None;
-        #[cfg(test)]
-        let client = Self::new_for_test(
-            self.connection.clone(),
-            self.binding.clone(),
-            config,
-            redactor.clone(),
-        );
-        #[cfg(not(test))]
-        let client = Self::new(
-            self.connection.clone(),
-            self.binding.clone(),
-            config,
-            redactor.clone(),
-        );
-        let Ok(client) = client else {
+        let Ok(client) =
+            self.subject_client(&request.subject, &request.stream_id, redactor.clone())
+        else {
             return denied();
         };
         let Some(sequence) = request.audit.expected_tail.checked_add(1) else {
@@ -262,6 +245,61 @@ impl AuditClient {
             }],
         };
         client.append_with_registry(batch, Ok(redactor)).await
+    }
+    /// A host-sink client of one subject's stream. Subjects other than the init
+    /// one always forward to the host sink, never to the init native journal.
+    fn subject_client(
+        &self,
+        subject: &tinysecurity_bus::SubjectScope,
+        stream_id: &str,
+        redactor: tinysecurity::Redactor,
+    ) -> Result<Self> {
+        let mut config = self.config.clone();
+        config.scope = subject.clone();
+        config.stream_id = stream_id.into();
+        config.native_path = None;
+        let mut client = Self::new(
+            self.connection.clone(),
+            self.binding.clone(),
+            config,
+            redactor,
+        )?;
+        #[cfg(test)]
+        {
+            client.test_ordinary_calls = true;
+        }
+        let _ = &mut client;
+        Ok(client)
+    }
+    /// The client of one registration's audit subject and stream.
+    ///
+    /// The init subject keeps the init stream and storage; any other stream for it
+    /// is refused. Another subject is pinned to its stream exactly like
+    /// `RecordAudit2` pins it, so a subject never writes to two ledgers.
+    pub(crate) fn for_subject(
+        &self,
+        subject: &tinysecurity_bus::SubjectScope,
+        stream_id: &str,
+    ) -> Result<Self> {
+        let refused = || tinybus::Error::failed("audit stream conflict");
+        if subject == &self.config.scope {
+            if stream_id != self.config.stream_id {
+                return Err(refused());
+            }
+            let mut client = self.subject_client(subject, stream_id, self.registry()?)?;
+            client
+                .config
+                .native_path
+                .clone_from(&self.config.native_path);
+            client.native.clone_from(&self.native);
+            #[cfg(test)]
+            {
+                client.test_ordinary_calls = self.test_ordinary_calls;
+            }
+            return Ok(client);
+        }
+        self.pins.pin(subject, stream_id).map_err(|_| refused())?;
+        self.subject_client(subject, stream_id, self.registry()?)
     }
     pub(crate) fn registry(&self) -> Result<tinysecurity::Redactor> {
         self.redactor
