@@ -492,3 +492,45 @@ async fn registry_replacement_sanitizes_subsequent_callback_without_changing_tru
     broker.abort();
     Ok(())
 }
+#[tokio::test]
+async fn subject_clients_keep_the_init_stream_and_pin_every_other_subject()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bus = MemoryBus::new();
+    let task = Broker::new().spawn(bus.clone());
+    let host = tinybus::Connection::connect(bus.connect().await?).await?;
+    let module = tinybus::Connection::connect(bus.connect().await?).await?;
+    let binding = PeerBinding::new(host.unique_name().as_ref().map(tinybus::BusName::as_str))?;
+    let init = AuditClient::new_for_test(
+        module,
+        binding,
+        config(true),
+        tinysecurity::Redactor::new(&RedactorConfig::default())?,
+    )?;
+    let init_subject = init.scope().clone();
+    let init_stream = init.stream_id().to_owned();
+    // The init subject never moves to another stream.
+    assert!(init.for_subject(&init_subject, &"9".repeat(32)).is_err());
+    let same = init.for_subject(&init_subject, &init_stream)?;
+    assert_eq!(
+        (same.scope(), same.stream_id()),
+        (&init_subject, init_stream.as_str())
+    );
+    assert!(same.required());
+    // Another subject gets its own stream, pinned against any second one.
+    let tenant = tinysecurity_bus::SubjectScope {
+        user: "tenant-user".into(),
+        workspace: "tenant-workspace".into(),
+        agent: "tenant-agent".into(),
+    };
+    let own = init.for_subject(&tenant, &"1".repeat(32))?;
+    assert_eq!(
+        (own.scope(), own.stream_id()),
+        (&tenant, "1".repeat(32).as_str())
+    );
+    assert!(own.native.is_none());
+    assert!(init.for_subject(&tenant, &"1".repeat(32)).is_ok());
+    assert!(init.for_subject(&tenant, &"2".repeat(32)).is_err());
+    assert!(init.for_subject(&tenant, "not-a-stream").is_err());
+    task.abort();
+    Ok(())
+}
