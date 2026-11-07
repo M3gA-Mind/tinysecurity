@@ -139,6 +139,18 @@ Full details: [browser dial specification](docs/specs/browser-dial-contract-1.28
 ## Host skill-scan decisions (contract 1.29)
 Full details: [host skill-scan specification](docs/specs/skill-scan-contract-1.29.md).
 
+## Registration-owned secret ciphers (contract 2.1)
+A host can boot the secret authority under a neutral scope and give each runtime
+secret registration its own routine cipher through `RegisterSecretScope2`. Each
+registration then owns its cipher, master, consumer, delivery slots and audit
+subject. Calls select state by `registration_id`, a pending entry is checked
+against its registration before removal, and a consumer is bound to one
+registration for the life of the process. The process-wide work budgets
+(`max_in_flight`, `max_pending_bytes`, `max_handles`) are still shared, and
+per-registration budgets are a follow-up. A registration whose store readback
+was uncertain stays dead by design.
+Full details: [registration-owned ciphers](docs/specs/runtime-secret-scopes-contract-1.29.md#registration-owned-ciphers-contract-21).
+
 ## Confidential injected master resolution
 Full details: [`Confidential injected master resolution`](docs/module-crypto.md#confidential-injected-master-resolution).
 

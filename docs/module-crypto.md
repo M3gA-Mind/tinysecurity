@@ -137,6 +137,8 @@ never prompt for routine fields or create master authority from a receipt.
 `secret_cipher` SDK metadata fixes one existing registration, consumer identity,
 enabled setting, callback timeout and physical slot count. It cannot change on
 reinit. Older 1.10 initialization omits it and retains its original behavior.
+Contract 2.1 adds per-registration runtime ciphers next to this static one; see
+[registration-owned ciphers](specs/runtime-secret-scopes-contract-1.29.md#registration-owned-ciphers-contract-21).
 An older decoder does not know the additive `native_routine` audit kind; hosts
 using this capability must negotiate the new contract vocabulary.
 
