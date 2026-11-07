@@ -1491,6 +1491,61 @@ async fn actual_sdk_confidential_master_resolution_is_human_only_exact_and_fail_
 }
 
 #[tokio::test]
+async fn neutral_boot_holds_no_registration_and_grants_no_master() -> TestResult {
+    let bus = MemoryBus::new();
+    let owner = Broker::new();
+    let task = owner.spawn(bus.clone());
+    let connection = Connection::connect(bus.connect().await?).await?;
+    let peer = connection.unique_name().ok_or("peer")?;
+    let approvals = ApprovalConfig2 {
+        timeout_ms: 1000,
+        scopes: vec![scope()],
+    };
+    let audit = AuditConfig2 {
+        scope: scope().subject,
+        stream_id: "a".repeat(32),
+        timeout_ms: 1000,
+        required: true,
+        native_path: None,
+        max_bytes: 10000,
+        max_archives: 3,
+        journal_max_bytes: 100_000,
+        journal_max_events: 1000,
+    };
+    let redactor = tinysecurity::Redactor::new(&RedactorConfig::default())?;
+    let clock = Arc::new(FixedClock(std::sync::atomic::AtomicU64::new(1000)));
+    let engine = tinysecurity::approval::Engine::new(
+        approvals.clone(),
+        Arc::new(crate::approval_callbacks::ApprovalClients::new(
+            &connection,
+            Some(peer.as_str()),
+            &approvals,
+            &audit,
+            &redactor,
+        )?),
+        clock.clone(),
+        redactor,
+    )?;
+    let mut neutral = config();
+    neutral.registrations.clear();
+    let secret = SecretState::new(
+        neutral,
+        &connection,
+        peer.as_str(),
+        &approvals,
+        &engine,
+        1,
+        clock,
+    )?;
+    // The host scope exists, but no master, cipher or pairing binding hangs off it.
+    assert!(secret.cipher_scope(&"b".repeat(32)).is_err());
+    assert!(secret.config_master_for_scope(&"a".repeat(32)).is_err());
+    assert!(secret.registration(&request(1)).is_err());
+    task.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn runtime_secret_registration_is_bound_to_approval_scope_and_retirement() -> TestResult {
     if isolate_process_owned_fixture(
         "runtime_secret_registration_is_bound_to_approval_scope_and_retirement",
