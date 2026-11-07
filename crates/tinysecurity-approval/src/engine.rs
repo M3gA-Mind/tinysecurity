@@ -1171,9 +1171,6 @@ impl Engine {
         }
         Ok(())
     }
-    /// Exact approval-owned policy digest for trusted native registration composition.
-    /// # Errors
-    /// Rejects unknown registrations.
     /// The audit stream a runtime scope registered with; `None` for an init scope,
     /// which shares the base stream.
     /// # Errors
@@ -1181,6 +1178,9 @@ impl Engine {
     pub fn scope_audit_stream(&self, id: &str) -> Result<Option<String>> {
         Ok(self.entry(id)?.audit_stream_id.clone())
     }
+    /// Exact approval-owned policy digest for trusted native registration composition.
+    /// # Errors
+    /// Rejects unknown registrations.
     pub fn durable_policy_ref(&self, id: &str) -> Result<String> {
         Ok(binding::digest(
             b"tinysecurity/approval-policy/v1\0",
