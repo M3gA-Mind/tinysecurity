@@ -57,6 +57,7 @@ fn runtime_secret_scope_registration_only_accepts_the_trusted_descriptor()
             },
             legacy: vec![],
         },
+        cipher: None,
     };
     let value = serde_json::to_value(&request)?;
     assert_eq!(

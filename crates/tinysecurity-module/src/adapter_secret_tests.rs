@@ -759,6 +759,7 @@ impl Control {
             };
             let register_request = RegisterSecretScopeRequest2 {
                 registration: registration.clone(),
+                cipher: None,
             };
             let unknown = RegisterSecretScopeRequest2 {
                 registration: SecretRegistration2 {
@@ -772,6 +773,7 @@ impl Control {
                     },
                     legacy: vec![],
                 },
+                cipher: None,
             };
             assert!(
                 proxy
@@ -809,6 +811,7 @@ impl Control {
             let static_registration = config().registrations[0].clone();
             let static_request = RegisterSecretScopeRequest2 {
                 registration: static_registration.clone(),
+                cipher: None,
             };
             let static_receipt: SecretScopeReceipt2 = proxy
                 .call_confidential(names::methods::REGISTER_SECRET_SCOPE2, (&static_request,))
@@ -998,6 +1001,7 @@ impl Control {
                         names::methods::REGISTER_SECRET_SCOPE2,
                         (&RegisterSecretScopeRequest2 {
                             registration: registration.clone(),
+                            cipher: None,
                         },),
                     )
                     .await
@@ -1014,6 +1018,7 @@ impl Control {
             };
             let race_request = RegisterSecretScopeRequest2 {
                 registration: race_registration.clone(),
+                cipher: None,
             };
             self.service
                 .register_secret_scope2(race_request.clone())
@@ -1073,6 +1078,7 @@ impl Control {
                     names::methods::REGISTER_SECRET_SCOPE2,
                     (&RegisterSecretScopeRequest2 {
                         registration: replacement_registration.clone(),
+                        cipher: None,
                     },),
                 )
                 .await?;

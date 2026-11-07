@@ -92,9 +92,9 @@ fn new_members_are_advertised_and_named_by_contract_constants() {
 
 #[test]
 fn incompatible_execution_outcome_requires_a_new_contract_major() {
-    assert_eq!(CONTRACT_VERSION, (2, 0));
-    // A 2.0 host accepts compatible 2.x modules, but older 1.x hosts reject this module.
-    assert!(is_compatible((2, 0)));
+    assert_eq!(CONTRACT_VERSION, (2, 1));
+    // A 2.1 host accepts compatible 2.1+ modules, but older 1.x hosts reject this module.
+    assert!(!is_compatible((2, 0)));
     assert!(is_compatible((2, 1)));
     assert!(!is_compatible((1, 36)));
     assert!(!is_compatible((1, 35)));
