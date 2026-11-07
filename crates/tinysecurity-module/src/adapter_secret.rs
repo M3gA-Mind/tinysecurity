@@ -446,6 +446,11 @@ impl SecretState {
         request: RegisterSecretScopeRequest2,
         engine: &tinysecurity::approval::Engine,
     ) -> tinybus::Result<SecretScopeReceipt2> {
+        // A registration-owned cipher is not implemented by this module yet:
+        // refuse it instead of registering a master without the cipher asked for.
+        if request.cipher.is_some() {
+            return Err(denied());
+        }
         let descriptor = request.registration;
         let scope = engine
             .scope_snapshot(&descriptor.approval_scope_id)
