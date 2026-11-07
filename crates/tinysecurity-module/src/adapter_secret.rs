@@ -187,9 +187,7 @@ impl SecretState {
     ) -> tinybus::Result<Self> {
         // Zero registrations is a neutral boot: the authority exists for runtime
         // registrations, and nothing resolves until the host registers a scope.
-        if config.registrations.len() > 128
-            || !(1..=30000).contains(&config.callback_timeout_ms)
-        {
+        if config.registrations.len() > 128 || !(1..=30000).contains(&config.callback_timeout_ms) {
             return Err(denied());
         }
         let mut inventory = Inventory::default();
