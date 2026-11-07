@@ -258,18 +258,21 @@ impl AuditClient {
         config.scope = subject.clone();
         config.stream_id = stream_id.into();
         config.native_path = None;
-        let mut client = Self::new(
+        #[cfg(test)]
+        let client = Self::new_for_test(
             self.connection.clone(),
             self.binding.clone(),
             config,
             redactor,
-        )?;
-        #[cfg(test)]
-        {
-            client.test_ordinary_calls = true;
-        }
-        let _ = &mut client;
-        Ok(client)
+        );
+        #[cfg(not(test))]
+        let client = Self::new(
+            self.connection.clone(),
+            self.binding.clone(),
+            config,
+            redactor,
+        );
+        client
     }
     /// The client of one registration's audit subject and stream.
     ///
