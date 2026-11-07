@@ -123,14 +123,21 @@ struct Backend {
     mode: u32,
     loads: AtomicU32,
     sets: AtomicU32,
-    rows: Mutex<BTreeMap<String, ApprovalRecord2>>,
+    /// Approval records of each store scope, keyed by (scope, record id).
+    rows: Mutex<BTreeMap<(String, String), ApprovalRecord2>>,
     batches: Mutex<Vec<AuditSinkRequest2>>,
-    target: Mutex<Option<Zeroizing<Vec<u8>>>>,
+    /// The stored master of each secret backend: tenants never share one key.
+    targets: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
     registry: Mutex<Option<handles::Registry>>,
     mutation_pending: std::sync::atomic::AtomicBool,
     release: tokio::sync::Notify,
-    cipher_slots: Mutex<BTreeMap<u16, cipher_tests::Slot>>,
+    /// Staged receiver slots, keyed by (consumer, slot).
+    cipher_slots: Mutex<BTreeMap<(String, u16), cipher_tests::Slot>>,
     cipher_clock: Mutex<Option<Arc<FixedClock>>>,
+    /// A consumer whose deliveries the host refuses (tenant fault injection).
+    failing_consumer: Mutex<Option<String>>,
+    /// Next audit correlation of the tenant fixture.
+    sequence: std::sync::atomic::AtomicU64,
 }
 impl Backend {
     fn new(mode: u32) -> Self {
@@ -140,15 +147,26 @@ impl Backend {
             sets: AtomicU32::new(0),
             rows: Mutex::new(BTreeMap::new()),
             batches: Mutex::new(Vec::new()),
-            target: Mutex::new(
-                (mode >= 20 || matches!(mode, 0 | 17))
-                    .then(|| Zeroizing::new("AA".repeat(32).into_bytes())),
-            ),
+            targets: Mutex::new(if mode >= cipher_tests::TENANT_MODES {
+                cipher_tests::TENANTS
+                    .iter()
+                    .map(|tenant| (tenant.backend_id(), tenant.key()))
+                    .collect()
+            } else if mode >= 20 || matches!(mode, 0 | 17) {
+                BTreeMap::from([(
+                    "c".repeat(32),
+                    Zeroizing::new("AA".repeat(32).into_bytes()),
+                )])
+            } else {
+                BTreeMap::new()
+            }),
             registry: Mutex::new(None),
             mutation_pending: std::sync::atomic::AtomicBool::new(false),
             release: tokio::sync::Notify::new(),
             cipher_slots: Mutex::new(BTreeMap::new()),
             cipher_clock: Mutex::new(None),
+            failing_consumer: Mutex::new(None),
+            sequence: std::sync::atomic::AtomicU64::new(1),
         }
     }
 }
@@ -157,13 +175,15 @@ struct Store(Arc<Backend>);
 #[tinybus::interface(name = "ai.tinyhumans.tinysecurity.ApprovalStore2")]
 impl Store {
     async fn load(&self, request: ApprovalLoadRequest2) -> tinybus::Result<ApprovalLoadResponse2> {
+        let scope = serde_json::to_string(&request.scope)?;
         let records = self
             .0
             .rows
             .lock()
             .map_err(|_| denied())?
-            .values()
-            .cloned()
+            .iter()
+            .filter(|((owner, _), _)| owner == &scope)
+            .map(|(_, record)| record.clone())
             .collect();
         std::future::ready(Ok(ApprovalLoadResponse2 {
             scope: request.scope,
@@ -173,8 +193,12 @@ impl Store {
     }
     async fn cas(&self, request: ApprovalCasRequest2) -> tinybus::Result<ApprovalCasResponse2> {
         let receipt = {
+            let key = (
+                serde_json::to_string(&request.scope)?,
+                request.record_id.clone(),
+            );
             let mut rows = self.0.rows.lock().map_err(|_| denied())?;
-            if rows.get(&request.record_id).map(|r| r.version) != request.expected_version {
+            if rows.get(&key).map(|r| r.version) != request.expected_version {
                 return Err(denied());
             }
             let receipt = ApprovalCasResponse2 {
@@ -183,7 +207,7 @@ impl Store {
                 mutation_id: request.mutation_id.clone(),
                 resulting_version: request.next_record.version,
             };
-            rows.insert(request.record_id, request.next_record);
+            rows.insert(key, request.next_record);
             receipt
         };
         std::future::ready(Ok(receipt)).await
@@ -268,6 +292,20 @@ impl Prompt {
 struct Secrets(Arc<Backend>);
 impl Secrets {
     fn verify_inventory(&self, identity: &SecretBackendIdentity2) -> tinybus::Result<()> {
+        if self.0.mode >= cipher_tests::TENANT_MODES {
+            // Each tenant reaches only its own target backend, never another's.
+            let owned = cipher_tests::TENANTS.iter().any(|tenant| {
+                identity.registration_id == tenant.registration_id()
+                    && identity.backend_id == tenant.backend_id()
+                    && identity.slot == MasterSlotKind2::User
+                    && identity.phase != SecretPhase2::LegacyRead
+            });
+            return if owned && identity.generation == 1 {
+                Ok(())
+            } else {
+                Err(denied())
+            };
+        }
         let config = config();
         let descriptor = &config.registrations[0];
         let app = self.0.mode == 17;
@@ -305,6 +343,7 @@ impl Secrets {
     #[tinybus(confidential)]
     async fn load(&self, request: SecretBackendLoadRequest2) -> tinybus::Result<serde_json::Value> {
         self.verify_inventory(&request.identity)?;
+        let backend = request.identity.backend_id.clone();
         if self.0.mutation_pending.load(Ordering::SeqCst)
             && request.identity.phase != SecretPhase2::TargetReadback
         {
@@ -346,7 +385,7 @@ impl Secrets {
                         encoded: vec![b' '; 4097],
                     }
                 } else {
-                    self.0.target.lock().map_err(|_| denied())?.as_ref().map_or(
+                    self.0.targets.lock().map_err(|_| denied())?.get(&backend).map_or(
                         SecretBackendLoadStatus2::Absent,
                         |v| SecretBackendLoadStatus2::Present {
                             encoded: v.to_vec(),
@@ -382,10 +421,10 @@ impl Secrets {
             SecretPhase2::TargetReadback => SecretBackendLoadStatus2::Present {
                 encoded: self
                     .0
-                    .target
+                    .targets
                     .lock()
                     .map_err(|_| denied())?
-                    .as_ref()
+                    .get(&backend)
                     .ok_or_else(denied)?
                     .to_vec(),
             },
@@ -411,15 +450,19 @@ impl Secrets {
             // Actual detached provider future survives callback cancellation/timeout.
             let state = self.0.clone();
             let encoded = Zeroizing::new(request.encoded.clone());
+            let backend = request.identity.backend_id.clone();
             tokio::spawn(async move {
                 state.release.notified().await;
-                if let Ok(mut target) = state.target.lock() {
-                    *target = Some(encoded);
+                if let Ok(mut targets) = state.targets.lock() {
+                    targets.insert(backend, encoded);
                 }
             });
             std::future::pending::<()>().await;
         }
-        *self.0.target.lock().map_err(|_| denied())? = Some(Zeroizing::new(request.encoded));
+        self.0.targets.lock().map_err(|_| denied())?.insert(
+            request.identity.backend_id.clone(),
+            Zeroizing::new(request.encoded),
+        );
         // Keep the host slot fence until exact readback; test mode10 never clears it.
         std::future::ready(Ok(SecretBackendSetResponse2 {
             identity: request.identity,
@@ -712,6 +755,9 @@ impl Control {
         let proxy = self
             .connection
             .proxy(peer.as_str(), names::OBJECT_PATH, names::INTERFACE)?;
+        if self.state.mode >= cipher_tests::TENANT_MODES {
+            return self.exercise_tenants(&proxy).await;
+        }
         if self.state.mode == 19 {
             return self.rollback_pending().await;
         }
@@ -780,27 +826,6 @@ impl Control {
                     .call_confidential::<SecretScopeReceipt2>(
                         names::methods::REGISTER_SECRET_SCOPE2,
                         (&unknown,),
-                    )
-                    .await
-                    .is_err()
-            );
-            // Until a module implements registration-owned ciphers, a requested
-            // cipher must be refused rather than silently ignored.
-            let with_cipher = RegisterSecretScopeRequest2 {
-                registration: registration.clone(),
-                cipher: Some(SecretScopeCipher2 {
-                    consumer_id: "8".repeat(32),
-                    enabled: true,
-                    slots: 1,
-                    timeout_ms: 1000,
-                    audit_stream_id: "9".repeat(32),
-                }),
-            };
-            assert!(
-                proxy
-                    .call_confidential::<SecretScopeReceipt2>(
-                        names::methods::REGISTER_SECRET_SCOPE2,
-                        (&with_cipher,),
                     )
                     .await
                     .is_err()
@@ -1194,10 +1219,10 @@ impl Control {
         self.verify_reinit_transition().await?;
         let target = self
             .state
-            .target
+            .targets
             .lock()
             .map_err(|_| denied())?
-            .as_ref()
+            .get(&"c".repeat(32))
             .map(|v| v.to_vec());
         if self.state.mode == 1 {
             assert_eq!(
@@ -1355,6 +1380,11 @@ mod linked_fixture {
             .map_err(|_| denied())?,
         );
         let mut facade_config = super::config();
+        if mode >= cipher_tests::TENANT_MODES {
+            // Neutral boot: no init registration, master or cipher; tenants
+            // arrive at runtime through their own approval and secret scopes.
+            facade_config.registrations.clear();
+        }
         if mode == 17 {
             facade_config.registrations[0].purpose = MasterPurpose2::AppEncryptionMaster;
             facade_config.registrations[0].target.slot = MasterSlotKind2::App;

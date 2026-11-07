@@ -47,20 +47,22 @@ impl Consumer {
         request: SecretCipherDeliveryRequest2,
     ) -> tinybus::Result<SecretCipherDeliveryResponse2> {
         let mut identity = request.identity;
-        if identity.consumer_id != "f".repeat(32)
-            || identity.registration_id != "b".repeat(32)
-            || identity.slot != 0
-            || identity.generation != 1
+        if !registered_consumer(self.0.mode, &identity) || identity.generation != 1 {
+            return Err(denied());
+        }
+        if self.0.failing_consumer.lock().map_err(|_| denied())?.as_ref()
+            == Some(&identity.consumer_id)
         {
             return Err(denied());
         }
         {
             let mut slots = self.0.cipher_slots.lock().map_err(|_| denied())?;
-            if slots.contains_key(&identity.slot) {
+            let key = (identity.consumer_id.clone(), identity.slot);
+            if slots.contains_key(&key) {
                 return Err(denied());
             }
             slots.insert(
-                identity.slot,
+                key,
                 Slot {
                     identity: identity.clone(),
                     plain: Zeroizing::new(request.plaintext),
@@ -111,7 +113,7 @@ pub(super) fn configured_fixture(
     if state.mode == 20 {
         reject_invalid_setup(connection, secret, engine, &audit_client)?;
     }
-    let cipher = if state.mode >= 20 {
+    let cipher = if (20..TENANT_MODES).contains(&state.mode) {
         Some(super::super::super::cipher::create(
             config(state.mode),
             connection,
@@ -307,6 +309,7 @@ impl Control {
                 4 => changed.ttl_ms -= 1,
                 _ => changed.registration_id.push('x'),
             }
+            let substituted_registration = mode == 5;
             let execute = ExecuteSecretCipherRequest2 {
                 request: changed,
                 pending_id: pending.pending_id,
@@ -316,6 +319,23 @@ impl Control {
             };
             sequence += 3;
             assert!(self.service.cipher_execute(execute.clone()).await.is_err());
+            if substituted_registration {
+                // Another registration cannot consume this pending: it stays
+                // live for its own registration, which still executes it once.
+                self.service
+                    .cipher_execute(ExecuteSecretCipherRequest2 {
+                        request: original,
+                        ..execute.clone()
+                    })
+                    .await?;
+                self.state
+                    .cipher_slots
+                    .lock()
+                    .map_err(|_| denied())?
+                    .clear();
+                assert!(self.service.cipher_execute(execute).await.is_err());
+                continue;
+            }
             assert!(
                 self.service
                     .cipher_execute(ExecuteSecretCipherRequest2 {
@@ -472,7 +492,7 @@ impl Control {
                         .cipher_slots
                         .lock()
                         .map_err(|_| denied())?
-                        .remove(&identity.slot)
+                        .remove(&(identity.consumer_id.clone(), identity.slot))
                         .ok_or_else(denied)?;
                     assert_eq!(slot.identity, identity);
                     assert_eq!(
@@ -490,6 +510,29 @@ impl Control {
             assert!(self.service.cipher_execute(execute).await.is_err());
         }
         assert_eq!(encrypted.is_some(), self.state.mode == 20);
+        if self.state.mode == 20 {
+            // The static path keeps its init-owned cipher: a runtime request
+            // cannot attach a second cipher to a static registration.
+            let static_request = RegisterSecretScopeRequest2 {
+                registration: super::config().registrations[0].clone(),
+                cipher: Some(SecretScopeCipher2 {
+                    consumer_id: "f".repeat(32),
+                    enabled: true,
+                    slots: 1,
+                    timeout_ms: 50,
+                    audit_stream_id: "a".repeat(32),
+                }),
+            };
+            assert!(
+                proxy
+                    .call_confidential::<SecretScopeReceipt2>(
+                        names::methods::REGISTER_SECRET_SCOPE2,
+                        (&static_request,),
+                    )
+                    .await
+                    .is_err()
+            );
+        }
         self.reject_substituted_execution(&handle, sequence).await?;
         self.expired_pending_releases_capacity_before_readmission(&handle)
             .await?;
@@ -556,3 +599,7 @@ async fn actual_confidential_cipher_dispatch_stages_only_at_fixed_slots_and_fail
     }
     Ok(())
 }
+
+#[path = "adapter_secret_cipher_tenant_tests.rs"]
+mod tenants;
+pub(super) use tenants::{TENANT_MODES, TENANTS, registered_consumer};
