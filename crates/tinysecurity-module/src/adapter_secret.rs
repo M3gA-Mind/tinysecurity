@@ -117,6 +117,16 @@ fn unique_config_master_for_scope<'a>(
     }
     Ok(registration)
 }
+/// The receipt of a live registration, and whether this call created it.
+fn active(registration_id: String, created: bool) -> (SecretScopeReceipt2, bool) {
+    (
+        SecretScopeReceipt2 {
+            registration_id,
+            active: true,
+        },
+        created,
+    )
+}
 fn ensure_scope_id_matches(scope_id: &str, canonical: &ApprovalScope2) -> tinybus::Result<()> {
     if canonical.scope_id != scope_id {
         return Err(denied());
@@ -466,13 +476,7 @@ impl SecretState {
         if let Some(existing) = self.registered.get(&registration_id) {
             // A static registration keeps its init-owned cipher, if any.
             return if existing.descriptor == descriptor && cipher.is_none() {
-                Ok((
-                    SecretScopeReceipt2 {
-                        registration_id,
-                        active: true,
-                    },
-                    false,
-                ))
+                Ok(active(registration_id, false))
             } else {
                 Err(denied())
             };
@@ -483,13 +487,7 @@ impl SecretState {
             return if existing.descriptor == descriptor
                 && super::cipher::matches_runtime(&registration_id, cipher.as_ref())?
             {
-                Ok((
-                    SecretScopeReceipt2 {
-                        registration_id,
-                        active: true,
-                    },
-                    false,
-                ))
+                Ok(active(registration_id, false))
             } else {
                 Err(denied())
             };
@@ -562,13 +560,7 @@ impl SecretState {
                 resolver,
             }),
         );
-        Ok((
-            SecretScopeReceipt2 {
-                registration_id,
-                active: true,
-            },
-            true,
-        ))
+        Ok(active(registration_id, true))
     }
     pub(super) fn retire_approval_scope(&self, scope_id: &str) -> tinybus::Result<()> {
         let mut dynamic = self.dynamic.lock().map_err(|_| denied())?;

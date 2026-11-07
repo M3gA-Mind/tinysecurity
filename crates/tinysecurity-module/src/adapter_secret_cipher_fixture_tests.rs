@@ -418,6 +418,29 @@ impl Control {
         }
         Ok(serde_json::json!({"denied":true}))
     }
+    /// The static path keeps its init-owned cipher: a runtime request cannot
+    /// attach a second cipher to a static registration.
+    async fn static_cipher_stays_init_owned(proxy: &tinybus::Proxy) {
+        let static_request = RegisterSecretScopeRequest2 {
+            registration: super::config().registrations[0].clone(),
+            cipher: Some(SecretScopeCipher2 {
+                consumer_id: "f".repeat(32),
+                enabled: true,
+                slots: 1,
+                timeout_ms: 50,
+                audit_stream_id: "a".repeat(32),
+            }),
+        };
+        assert!(
+            proxy
+                .call_confidential::<SecretScopeReceipt2>(
+                    names::methods::REGISTER_SECRET_SCOPE2,
+                    (&static_request,),
+                )
+                .await
+                .is_err()
+        );
+    }
     pub(super) async fn exercise_cipher(
         &self,
         proxy: &tinybus::Proxy,
@@ -516,27 +539,7 @@ impl Control {
         }
         assert_eq!(encrypted.is_some(), self.state.mode == 20);
         if self.state.mode == 20 {
-            // The static path keeps its init-owned cipher: a runtime request
-            // cannot attach a second cipher to a static registration.
-            let static_request = RegisterSecretScopeRequest2 {
-                registration: super::config().registrations[0].clone(),
-                cipher: Some(SecretScopeCipher2 {
-                    consumer_id: "f".repeat(32),
-                    enabled: true,
-                    slots: 1,
-                    timeout_ms: 50,
-                    audit_stream_id: "a".repeat(32),
-                }),
-            };
-            assert!(
-                proxy
-                    .call_confidential::<SecretScopeReceipt2>(
-                        names::methods::REGISTER_SECRET_SCOPE2,
-                        (&static_request,),
-                    )
-                    .await
-                    .is_err()
-            );
+            Self::static_cipher_stays_init_owned(proxy).await;
         }
         self.reject_substituted_execution(&handle, sequence).await?;
         self.expired_pending_releases_capacity_before_readmission(&handle)
