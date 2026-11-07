@@ -784,6 +784,27 @@ impl Control {
                     .await
                     .is_err()
             );
+            // Until a module implements registration-owned ciphers, a requested
+            // cipher must be refused rather than silently ignored.
+            let with_cipher = RegisterSecretScopeRequest2 {
+                registration: registration.clone(),
+                cipher: Some(SecretScopeCipher2 {
+                    consumer_id: "8".repeat(32),
+                    enabled: true,
+                    slots: 1,
+                    timeout_ms: 1000,
+                    audit_stream_id: "9".repeat(32),
+                }),
+            };
+            assert!(
+                proxy
+                    .call_confidential::<SecretScopeReceipt2>(
+                        names::methods::REGISTER_SECRET_SCOPE2,
+                        (&with_cipher,),
+                    )
+                    .await
+                    .is_err()
+            );
             let receipt: SecretScopeReceipt2 = proxy
                 .call_confidential(names::methods::REGISTER_SECRET_SCOPE2, (&register_request,))
                 .await?;
