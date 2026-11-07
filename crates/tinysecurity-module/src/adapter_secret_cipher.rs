@@ -1,5 +1,11 @@
 //! Fixed routine authority over real acquired masters. Native output is staged in
 //! bounded physical slots; unknown callback work permanently occupies its slot.
+//!
+//! Two kinds of cipher share this machinery. The static cipher comes from init
+//! config and audits under the init subject. A runtime cipher belongs to one
+//! secret registration (`RegisterSecretScope2` with a cipher, contract 2.1): it
+//! has its own consumer, slots, audit subject and stream, and every call selects
+//! its state by the request's registration, so one tenant can never reach another's.
 use super::{PolicyService, secret::SecretState};
 use crate::callbacks::AuditClient;
 use std::collections::BTreeMap;
@@ -16,11 +22,33 @@ use tinysecurity_bus::{
     AuditSinkResponse2, EvaluateSecretCipherRequest2, ExecuteSecretCipherRequest2,
     SecretCipherConfig2, SecretCipherDeliveryIdentity2, SecretCipherDeliveryRequest2,
     SecretCipherDeliveryResponse2, SecretCipherKind2, SecretCipherPending2, SecretCipherRequest2,
-    SecretCipherResponse2, SubjectScope, callback_names2,
+    SecretCipherResponse2, SecretScopeCipher2, SubjectScope, callback_names2,
 };
 use zeroize::Zeroize;
 
 static CIPHER: OnceLock<Option<Arc<CipherState>>> = OnceLock::new();
+/// Runtime ciphers, keyed by the secret registration that owns each one.
+static RUNTIME: OnceLock<Mutex<BTreeMap<String, Arc<CipherState>>>> = OnceLock::new();
+/// Consumer identities, each bound to one registration and its physical slots for
+/// the process lifetime: a slot left uncertain is never handed out again, not even
+/// to a later cipher of the same registration.
+static CONSUMERS: OnceLock<Mutex<BTreeMap<String, ConsumerBinding>>> = OnceLock::new();
+/// The one pending inventory of every cipher, so generation activation can hold it.
+static PENDING: OnceLock<Mutex<BTreeMap<String, Pending>>> = OnceLock::new();
+type Slots = Arc<Mutex<Vec<Option<String>>>>;
+struct ConsumerBinding {
+    registration: String,
+    slots: Slots,
+}
+fn runtime() -> &'static Mutex<BTreeMap<String, Arc<CipherState>>> {
+    RUNTIME.get_or_init(Mutex::default)
+}
+fn consumers() -> &'static Mutex<BTreeMap<String, ConsumerBinding>> {
+    CONSUMERS.get_or_init(Mutex::default)
+}
+fn pending() -> &'static Mutex<BTreeMap<String, Pending>> {
+    PENDING.get_or_init(Mutex::default)
+}
 fn denied() -> tinybus::Error {
     tinybus::Error::failed("secret authority denied")
 }
@@ -63,6 +91,8 @@ fn metadata(request: &SecretCipherRequest2) -> SecretCipherRequest2 {
     }
 }
 pub(super) struct Pending {
+    /// The cipher that admitted this work; only its own registration executes it.
+    state: Arc<CipherState>,
     request: SecretCipherRequest2,
     work: CipherPending,
     intent: RoutineAcknowledgement,
@@ -101,10 +131,13 @@ struct Broker {
     peer: tinybus::BusName,
     config: SecretCipherConfig2,
     secret: Arc<SecretState>,
+    /// The client of this cipher's own audit subject and stream.
     audit: Arc<AuditClient>,
+    /// The init client, whose redaction registry follows policy reinit.
+    registry_source: Arc<AuditClient>,
     subject: SubjectScope,
     audit_binding: Mutex<(SubjectScope, String)>,
-    slots: Mutex<Vec<Option<String>>>,
+    slots: Slots,
     contexts: Mutex<BTreeMap<String, Arc<Context>>>,
 }
 impl Broker {
@@ -182,7 +215,7 @@ impl Broker {
         };
         let evidence = self
             .audit
-            .append_native_with_registry(batch, self.audit.registry())
+            .append_native_with_registry(batch, self.registry_source.registry())
             .await;
         if !evidence.permitted || !evidence.committed || evidence.health != AuditHealth2::Healthy {
             return Err(denied());
