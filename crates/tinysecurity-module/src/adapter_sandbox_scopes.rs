@@ -245,7 +245,7 @@ impl PolicyService {
             .write()
             .map_err(|_| failure(&tinysecurity_bus::Error::Faulted))?;
         // Initialized scopes are replaced by reinitialization, never retired.
-        let subject = engine
+        engine
             .retire_scope(&request.scope_id)
             .map_err(|_| refused("sandbox scope cannot be retired"))?;
         clients.remove(&request.scope_id);
