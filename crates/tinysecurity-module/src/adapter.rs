@@ -2452,6 +2452,7 @@ async fn setup(connection: Connection, mut config: ModuleConfig) -> BusResult<()
         sandbox.as_ref().map(|(_, engine)| engine),
         audit_config,
         (&connection, &binding),
+        audit.as_ref().map(|client| client.pins()),
     )?;
     service.approvals = approvals.as_ref().map(|(_, engine)| Arc::clone(engine));
     if let Some(engine) = &service.approvals {
