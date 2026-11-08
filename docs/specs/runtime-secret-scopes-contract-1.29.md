@@ -68,7 +68,9 @@ The module enforces tenant isolation itself:
   stream. Any other subject is pinned to its stream in the same table that
   `RecordAudit2` uses, so a subject never writes to two ledgers. Those pins are
   kept after retirement, so a retired subject cannot come back on a different
-  stream in the same process.
+  stream in the same process. Approval scopes, sandbox scopes and host-recorded
+  audit each hold a subject's pin separately; a release by one path frees the
+  stream only after the last holder lets go.
 - Two live cipher registrations never share one master. At each cipher request
   the module computes a keyed, non-secret fingerprint of the registration's
   master (HMAC-SHA256 keyed by the master over the label
