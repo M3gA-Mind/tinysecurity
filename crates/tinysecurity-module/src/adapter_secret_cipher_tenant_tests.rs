@@ -610,38 +610,6 @@ impl Control {
         let SecretResponse2::MasterHandle { .. } = response;
         Ok(())
     }
-    /// Mode 47: a host record cannot move a runtime subject onto a second stream.
-    async fn tenant_record_stays_on_its_stream(
-        &self,
-        proxy: &tinybus::Proxy,
-    ) -> tinybus::Result<()> {
-        self.register_tenants(proxy).await?;
-        let [one, _] = &TENANTS;
-        let info: tinysecurity_bus::PolicyInfo = proxy
-            .call(names::methods::POLICY_INFO, serde_json::json!([]))
-            .await?;
-        let other = AuditRecordRequest2 {
-            subject: one.subject(),
-            stream_id: "3f".repeat(16),
-            kind: AuditKind2::PolicyDecision,
-            attribution: "tool:host".into(),
-            arguments_json: "{}".into(),
-            rule_ids: vec![],
-            audit: AuditCorrelation2 {
-                event_id: "a".repeat(32),
-                expected_tail: 0,
-                generation: info.generation,
-            },
-        };
-        let response: AuditResponse2 = proxy
-            .call(names::methods::RECORD_AUDIT2, (&other,))
-            .await?;
-        assert!(
-            !response.permitted && !response.committed,
-            "a host record cannot move a runtime subject to another stream"
-        );
-        Ok(())
-    }
     pub(in super::super) async fn exercise_tenants(
         &self,
         proxy: &tinybus::Proxy,
@@ -654,7 +622,6 @@ impl Control {
             44 => self.tenant_failed_delivery(proxy).await?,
             45 => self.tenant_runtime_lifecycle(proxy).await?,
             46 => self.tenant_pending_survives_other_scope(proxy).await?,
-            47 => self.tenant_record_stays_on_its_stream(proxy).await?,
             _ => return Err(denied()),
         }
         Ok(serde_json::json!({"tenants": true}))
@@ -738,14 +705,6 @@ async fn pending_master_requests_survive_another_tenants_scope_replacement() -> 
     tenant_fixture(
         "pending_master_requests_survive_another_tenants_scope_replacement",
         46,
-    )
-    .await
-}
-#[tokio::test]
-async fn a_host_record_cannot_move_a_runtime_subject_to_another_stream() -> TestResult {
-    tenant_fixture(
-        "a_host_record_cannot_move_a_runtime_subject_to_another_stream",
-        47,
     )
     .await
 }

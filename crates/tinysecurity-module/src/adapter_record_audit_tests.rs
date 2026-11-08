@@ -239,4 +239,75 @@ async fn the_init_subject_never_records_on_an_alternate_stream()
     assert!(accepted.permitted && accepted.committed);
     Ok(())
 }
+#[tokio::test]
+async fn an_approved_runtime_subject_cannot_record_on_a_second_stream()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use tinysecurity_bus::{AccessTier, ApprovalConfig2, ApprovalScope2};
+    let bus = MemoryBus::new();
+    let broker = Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await?).await?;
+    let module = Connection::connect(bus.connect().await?).await?;
+    let peer = host.unique_name().ok_or("host peer")?;
+    let binding = PeerBinding::new(Some(peer.as_str()))?;
+    let rows: Rows = Arc::default();
+    let policy = Arc::new(RwLock::new(Policy::new(ModuleConfig::default())?));
+    host.serve_at(
+        callback_names2::OBJECT_PATH.parse()?,
+        PermissionAuditSink {
+            rows: rows.clone(),
+            policy: policy.clone(),
+            change_generation: Arc::default(),
+        },
+    )
+    .await?;
+    let _fixture = Fixture {
+        _host: host,
+        broker,
+    };
+    let config = permission_audit_config(true);
+    let redactor = tinysecurity::Redactor::new(&RedactorConfig::default())?;
+    let init = crate::callbacks::AuditClient::new_for_test(
+        module.clone(),
+        binding,
+        config.clone(),
+        redactor.clone(),
+    )?;
+    // The approval table and the host-record path must share one pin table.
+    let approvals = crate::approval_callbacks::ApprovalClients::new(
+        &module,
+        Some(peer.as_str()),
+        &ApprovalConfig2 {
+            timeout_ms: 30_000,
+            scopes: vec![],
+        },
+        &config,
+        &redactor,
+    )?
+    .with_pins(init.pins());
+    let approved = ApprovalScope2 {
+        scope_id: "f".repeat(32),
+        subject: subject("approved"),
+        policy_ref: "runtime".into(),
+        generation: 1,
+        ceiling: AccessTier::Full,
+        require_approval: true,
+        auto_approve_all: false,
+    };
+    approvals.admit_scope(&approved, &"b".repeat(32)).await?;
+
+    let on = |stream: char, event: char| {
+        let mut request = record("approved", stream, AuditKind2::PolicyDecision, event, 0);
+        request.subject = approved.subject.clone();
+        request
+    };
+    let elsewhere = init.record(on('c', 'd'), 1, redactor.clone()).await;
+    assert!(
+        !elsewhere.permitted && !elsewhere.committed,
+        "a host record cannot move an approved subject to a second stream"
+    );
+    let own = init.record(on('b', 'e'), 1, redactor.clone()).await;
+    assert!(own.permitted && own.committed, "the approved stream still records");
+    assert!(!rows.lock().map_err(|_| "fixture rows")?.contains_key(&"d".repeat(32)));
+    Ok(())
+}
 
