@@ -19,9 +19,8 @@ pub(super) struct SandboxRuntime {
     redactor: tinysecurity::Redactor,
     /// One client per runtime scope identity.
     clients: RwLock<BTreeMap<String, Arc<AuditClient>>>,
-    /// Stream of each subject, shared with the approval and `RecordAudit2` tables so
-    /// a subject has one ledger across every path. Released only by its owners.
-    pub(super) pins: Arc<StreamPins>,
+    /// Stream of each subject while live and for a retention window after release.
+    pub(super) pins: StreamPins,
     /// Registration and retirement are serialized so a failed step is ours to undo.
     lifecycle: tokio::sync::Mutex<()>,
 }
@@ -31,7 +30,6 @@ impl SandboxRuntime {
         binding: PeerBinding,
         base: AuditConfig2,
         redactor: tinysecurity::Redactor,
-        pins: Arc<StreamPins>,
     ) -> Self {
         Self {
             connection,
@@ -39,7 +37,7 @@ impl SandboxRuntime {
             base,
             redactor,
             clients: RwLock::new(BTreeMap::new()),
-            pins,
+            pins: StreamPins::default(),
             lifecycle: tokio::sync::Mutex::new(()),
         }
     }
@@ -72,6 +70,9 @@ impl SandboxRuntime {
             self.redactor.clone(),
         );
         client
+    }
+    fn holds_subject(clients: &BTreeMap<String, Arc<AuditClient>>, subject: &SubjectScope) -> bool {
+        clients.values().any(|client| client.scope() == subject)
     }
 }
 
@@ -108,7 +109,6 @@ impl PolicyService {
         engine: Option<&Arc<Engine>>,
         audit: Option<AuditConfig2>,
         peer: (&tinybus::Connection, &PeerBinding),
-        pins: Option<Arc<StreamPins>>,
     ) -> BusResult<()> {
         self.sandbox = engine.cloned();
         self.sandbox_runtime = match (engine, audit) {
@@ -119,7 +119,6 @@ impl PolicyService {
                     peer.1.clone(),
                     base,
                     redactor,
-                    pins.unwrap_or_default(),
                 )))
             }
             _ => None,
@@ -213,11 +212,17 @@ impl PolicyService {
             .pins
             .pin(&subject, &request.audit_stream_id)
             .map_err(|_| refused("conflicting sandbox audit stream"))?;
-        // A failed registration keeps its pin: the table may hold this stream for an
-        // approval scope or a host record too, and only owners may release it.
+        let rollback = |clients: &BTreeMap<String, Arc<AuditClient>>| {
+            if !SandboxRuntime::holds_subject(clients, &subject) {
+                let _ = runtime.pins.unpin(&subject);
+            }
+        };
         let client = match runtime.build_client(&subject, &request.audit_stream_id) {
             Ok(client) => Arc::new(client),
             Err(error) => {
+                if let Ok(clients) = runtime.clients.read() {
+                    rollback(&clients);
+                }
                 return Err(error);
             }
         };
@@ -231,7 +236,10 @@ impl PolicyService {
                 drop(clients);
                 Ok(receipt(SandboxScopeOutcome2::Created, live(engine)?))
             }
-            Ok(Registration::Unchanged) | Err(_) => Err(refused("sandbox scope refused")),
+            Ok(Registration::Unchanged) | Err(_) => {
+                rollback(&clients);
+                Err(refused("sandbox scope refused"))
+            }
         }
     }
     pub(super) async fn retire_sandbox_scope(
@@ -245,12 +253,13 @@ impl PolicyService {
             .write()
             .map_err(|_| failure(&tinysecurity_bus::Error::Faulted))?;
         // Initialized scopes are replaced by reinitialization, never retired.
-        engine
+        let subject = engine
             .retire_scope(&request.scope_id)
             .map_err(|_| refused("sandbox scope cannot be retired"))?;
         clients.remove(&request.scope_id);
-        // The subject's pin stays: it may still be held by an approval scope or by
-        // host-recorded audit, and this retirement cannot prove those are gone.
+        if !SandboxRuntime::holds_subject(&clients, &subject) {
+            let _ = runtime.pins.unpin(&subject);
+        }
         drop(clients);
         let live = engine
             .live_scopes()
