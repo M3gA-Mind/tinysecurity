@@ -103,6 +103,9 @@ pub(in super::super) fn tenant_targets(mode: u32) -> BTreeMap<String, Zeroizing<
         targets.insert(TENANTS[1].backend_id(), TENANTS[0].key());
         targets.insert(PROBE.backend_id(), TENANTS[0].key());
     }
+    if mode == 49 {
+        targets.insert(TENANTS[1].backend_id(), TENANTS[0].key());
+    }
     targets
 }
 pub(in super::super) fn registered_consumer(
@@ -162,9 +165,19 @@ impl Control {
         proxy: &tinybus::Proxy,
         tenant: &Tenant,
     ) -> tinybus::Result<String> {
+        self.tenant_master_call(proxy, tenant, format!("tenant-{}-master", tenant.index))
+            .await
+    }
+    /// Acquire the tenant's master under one call id, so a tenant may acquire again.
+    async fn tenant_master_call(
+        &self,
+        proxy: &tinybus::Proxy,
+        tenant: &Tenant,
+        call_id: String,
+    ) -> tinybus::Result<String> {
         let request = SecretRequest2 {
             registration_id: tenant.registration_id(),
-            call_id: format!("tenant-{}-master", tenant.index),
+            call_id,
             ttl_ms: 30000,
             operation: SecretOperation2::ResolveConfigMaster,
         };
@@ -620,6 +633,36 @@ impl Control {
             .await?;
         Ok(())
     }
+    /// Mode 49: a registration keeps the fingerprint of every master it has used.
+    /// Rotating its key must not release the old fingerprint to another registration
+    /// that still holds the old key bytes, because the old handles stay valid.
+    async fn tenant_rotated_master_stays_bound(
+        &self,
+        proxy: &tinybus::Proxy,
+    ) -> tinybus::Result<()> {
+        self.register_tenants(proxy).await?;
+        let [one, two] = &TENANTS;
+        // Mode 49 gives tenant two tenant one's original key bytes.
+        let first = self.tenant_master(proxy, one).await?;
+        self.encrypt(proxy, one, &first, "before", b"old-key").await?;
+        let second = self.tenant_master(proxy, two).await?;
+        // The stored key of tenant one rotates; its next acquisition loads new bytes.
+        self.state
+            .targets
+            .lock()
+            .map_err(|_| denied())?
+            .insert(one.backend_id(), Zeroizing::new("CD".repeat(32).into_bytes()));
+        let rotated = self
+            .tenant_master_call(proxy, one, "tenant-one-rotated".into())
+            .await?;
+        self.encrypt(proxy, one, &rotated, "after", b"new-key")
+            .await?;
+        assert!(
+            self.encrypt(proxy, two, &second, "old", b"x").await.is_err(),
+            "rotating a key must not free its old fingerprint for another registration"
+        );
+        Ok(())
+    }
     /// Mode 46: replacing one tenant's approval scope drops only that scope's
     /// pending master requests, so the other tenant's request still resolves.
     async fn tenant_pending_survives_other_scope(
@@ -731,6 +774,7 @@ impl Control {
             45 => self.tenant_runtime_lifecycle(proxy).await?,
             46 => self.tenant_pending_survives_other_scope(proxy).await?,
             48 => self.tenant_duplicate_master_is_refused(proxy).await?,
+            49 => self.tenant_rotated_master_stays_bound(proxy).await?,
             _ => return Err(denied()),
         }
         Ok(serde_json::json!({"tenants": true}))
@@ -808,6 +852,10 @@ async fn runtime_tenants_work_after_a_neutral_boot_and_retire_alone() -> TestRes
         45,
     )
     .await
+}
+#[tokio::test]
+async fn a_rotated_master_keeps_its_fingerprint_bound() -> TestResult {
+    tenant_fixture("a_rotated_master_keeps_its_fingerprint_bound", 49).await
 }
 #[tokio::test]
 async fn two_live_registrations_never_share_one_master() -> TestResult {
