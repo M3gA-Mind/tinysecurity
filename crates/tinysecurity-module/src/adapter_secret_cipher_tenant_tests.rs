@@ -582,7 +582,9 @@ impl Control {
         let second = self.tenant_master(proxy, two).await?;
         let sealed = self.encrypt(proxy, one, &first, "seal", b"shared").await?;
         assert!(
-            self.encrypt(proxy, two, &second, "dup", b"x").await.is_err(),
+            self.encrypt(proxy, two, &second, "dup", b"x")
+                .await
+                .is_err(),
             "a second live registration cannot seal under an identical master"
         );
         assert!(
