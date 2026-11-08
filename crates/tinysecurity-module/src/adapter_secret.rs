@@ -637,12 +637,16 @@ impl SecretState {
                 .map_err(|_| denied())?;
             *current = scope.clone();
         }
+        // Static and runtime registrations both keep their pending work. Only
+        // entries of this scope, and orphans of no live registration, are dropped.
+        let dynamic = self.dynamic.lock().map_err(|_| denied())?;
         self.pending
             .lock()
             .map_err(|_| denied())?
             .retain(|(registration, _), _| {
                 self.registered
                     .get(registration)
+                    .or_else(|| dynamic.get(registration))
                     .is_some_and(|entry| entry.descriptor.approval_scope_id != scope_id)
             });
         Ok(())
