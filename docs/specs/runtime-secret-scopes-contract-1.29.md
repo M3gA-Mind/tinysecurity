@@ -49,8 +49,12 @@ The module enforces tenant isolation itself:
 
 - Every `EvaluateSecretCipher2` and `ExecuteSecretCipher2` call selects its
   cipher by `request.registration_id`. A master handle works only with the
-  registration that acquired it, so one tenant's ciphertext never opens under
-  another tenant's master.
+  registration that acquired it. While two cipher registrations are live they
+  cannot hold the same master (see the fingerprint rule below). The cipher does
+  not bind ciphertext to a registration, so a registration that acquires a master
+  after another registration's retirement can open ciphertext sealed under that
+  master. Retirement releases the fingerprint, and the isolation guarantee covers
+  live registrations only.
 - All ciphers share one pending inventory, so generation activation still holds
   it while it switches. Execute looks a pending entry up by ID and checks that it
   belongs to the requesting registration before removing it. Another
