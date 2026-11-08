@@ -288,7 +288,9 @@ impl Secrets {
     fn verify_inventory(&self, identity: &SecretBackendIdentity2) -> tinybus::Result<()> {
         if self.0.mode >= cipher_tests::TENANT_MODES {
             // Each tenant reaches only its own target backend, never another's.
-            let owned = cipher_tests::TENANTS.iter().any(|tenant| {
+            // The probe tenant joins only in mode 48, where it re-registers a master.
+            let probe = (self.0.mode == 48).then_some(&cipher_tests::PROBE);
+            let owned = cipher_tests::TENANTS.iter().chain(probe).any(|tenant| {
                 identity.registration_id == tenant.registration_id()
                     && identity.backend_id == tenant.backend_id()
                     && identity.slot == MasterSlotKind2::User

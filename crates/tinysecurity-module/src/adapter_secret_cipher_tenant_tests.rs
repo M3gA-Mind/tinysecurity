@@ -11,7 +11,7 @@ pub(in super::super) struct Tenant {
 }
 pub(in super::super) const TENANTS: [Tenant; 2] = [Tenant { index: 1 }, Tenant { index: 2 }];
 /// A tenant that is registered only to probe refused cipher requests.
-const PROBE: Tenant = Tenant { index: 3 };
+pub(in super::super) const PROBE: Tenant = Tenant { index: 3 };
 
 impl Tenant {
     fn id(&self, kind: char) -> String {
@@ -101,6 +101,7 @@ pub(in super::super) fn tenant_targets(mode: u32) -> BTreeMap<String, Zeroizing<
         .collect();
     if mode == 48 {
         targets.insert(TENANTS[1].backend_id(), TENANTS[0].key());
+        targets.insert(PROBE.backend_id(), TENANTS[0].key());
     }
     targets
 }
@@ -600,8 +601,8 @@ impl Control {
             .await?;
         self.encrypt(proxy, two, &second, "after-release", b"two")
             .await?;
-        // Removing the second releases its fingerprint too: the first registration
-        // registers again and seals under the same master.
+        // Removing the second releases its fingerprint too. A new registration
+        // (the probe tenant, which mode 48 gives the same master) then binds it.
         let _: ApprovalScopeReceipt2 = proxy
             .call(
                 names::methods::RETIRE_APPROVAL_SCOPE2,
@@ -610,10 +611,10 @@ impl Control {
                 },),
             )
             .await?;
-        self.register_approval(proxy, one).await?;
-        assert!(self.register(proxy, &one.request()).await?.active);
-        let again = self.tenant_master(proxy, one).await?;
-        self.encrypt(proxy, one, &again, "reregistered", b"one")
+        self.register_approval(proxy, &PROBE).await?;
+        assert!(self.register(proxy, &PROBE.request()).await?.active);
+        let reregistered = self.tenant_master(proxy, &PROBE).await?;
+        self.encrypt(proxy, &PROBE, &reregistered, "reregistered", b"probe")
             .await?;
         Ok(())
     }
