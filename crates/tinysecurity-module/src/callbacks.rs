@@ -226,8 +226,13 @@ impl AuditClient {
         if request.validate().is_err()
             || request.audit.generation != generation
             || (request.subject == self.config.scope && request.stream_id != self.config.stream_id)
-            || self.pins
-                .pin_for(&request.subject, &request.stream_id, crate::stream_pins::Owner::Recorded)
+            || self
+                .pins
+                .pin_for(
+                    &request.subject,
+                    &request.stream_id,
+                    crate::stream_pins::Owner::Recorded,
+                )
                 .is_err()
         {
             return denied();

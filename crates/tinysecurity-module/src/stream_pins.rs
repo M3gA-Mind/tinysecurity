@@ -62,7 +62,12 @@ impl StreamPins {
     }
     /// Pin a subject's stream for `owner` while it is live or recently released;
     /// refuse any other stream for it until the pin has been released for `ttl`.
-    pub(crate) fn pin_for(&self, subject: &SubjectScope, stream_id: &str, owner: Owner) -> Result<()> {
+    pub(crate) fn pin_for(
+        &self,
+        subject: &SubjectScope,
+        stream_id: &str,
+        owner: Owner,
+    ) -> Result<()> {
         if stream_id.len() != 32 || !stream_id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::Invalid);
         }

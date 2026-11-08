@@ -271,7 +271,9 @@ async fn a_subject_is_released_for_another_stream_only_after_its_last_scope_reti
 {
     let mut h = harness().await?;
     let mut runtime = runtime_for(&h)?;
-    runtime.pins.ttl = std::time::Duration::ZERO;
+    std::sync::Arc::get_mut(&mut runtime.pins)
+        .ok_or("stream pins already shared")?
+        .ttl = std::time::Duration::ZERO;
     h.service.sandbox_runtime = Some(Arc::new(runtime));
     let first = tenant("a", &h.facts);
     let mut second = first.clone();
@@ -309,7 +311,9 @@ async fn a_subject_is_released_for_another_stream_only_after_its_last_scope_reti
 async fn a_refused_registration_releases_the_subject_it_pinned() -> TestResult {
     let mut h = harness().await?;
     let mut runtime = runtime_for(&h)?;
-    runtime.pins.ttl = std::time::Duration::ZERO;
+    std::sync::Arc::get_mut(&mut runtime.pins)
+        .ok_or("stream pins already shared")?
+        .ttl = std::time::Duration::ZERO;
     h.service.sandbox_runtime = Some(Arc::new(runtime));
     let mut broken = tenant("a", &h.facts);
     broken.sources.clear();
@@ -420,8 +424,12 @@ async fn attaching_a_sandbox_enables_runtime_scopes_only_with_an_audit() -> Test
     h.service
         .attach_sandbox(Some(&engine), None, (&h.module, &binding), None)?;
     assert!(h.service.sandbox.is_some() && h.service.sandbox_runtime.is_none());
-    h.service
-        .attach_sandbox(Some(&engine), Some(audit.clone()), (&h.module, &binding), None)?;
+    h.service.attach_sandbox(
+        Some(&engine),
+        Some(audit.clone()),
+        (&h.module, &binding),
+        None,
+    )?;
     assert!(h.service.sandbox_runtime.is_some());
     h.service
         .attach_sandbox(None, Some(audit), (&h.module, &binding), None)?;
@@ -433,7 +441,9 @@ async fn attaching_a_sandbox_enables_runtime_scopes_only_with_an_audit() -> Test
 async fn an_unusable_audit_base_refuses_registration_and_releases_the_pin() -> TestResult {
     let mut h = harness().await?;
     let mut runtime = runtime_for(&h)?;
-    runtime.pins.ttl = std::time::Duration::ZERO;
+    std::sync::Arc::get_mut(&mut runtime.pins)
+        .ok_or("stream pins already shared")?
+        .ttl = std::time::Duration::ZERO;
     h.service.sandbox_runtime = Some(Arc::new(runtime));
     let scope = tenant("a", &h.facts);
     h.service
@@ -441,7 +451,9 @@ async fn an_unusable_audit_base_refuses_registration_and_releases_the_pin() -> T
         .await?;
     // A runtime whose base audit is invalid (zero timeout) never admits a scope.
     let mut broken = runtime_with_timeout(&h, 0)?;
-    broken.pins.ttl = std::time::Duration::ZERO;
+    std::sync::Arc::get_mut(&mut broken.pins)
+        .ok_or("stream pins already shared")?
+        .ttl = std::time::Duration::ZERO;
     h.service.sandbox_runtime = Some(Arc::new(broken));
     let second = tenant("b", &h.facts);
     assert!(

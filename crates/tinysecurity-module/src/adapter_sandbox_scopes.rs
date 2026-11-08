@@ -1,7 +1,11 @@
 //! Runtime sandbox scopes (contract 1.19): registration, retirement and the per-subject
 //! audit streams their plans are recorded on.
 use super::{Arc, BusResult, PolicyService, failure};
-use crate::{callbacks::AuditClient, callbacks::PeerBinding, stream_pins::StreamPins};
+use crate::{
+    callbacks::AuditClient,
+    callbacks::PeerBinding,
+    stream_pins::{Owner, StreamPins},
+};
 use std::{collections::BTreeMap, sync::RwLock};
 use tinysecurity::sandbox::{Engine, Registration};
 use tinysecurity_bus::{
