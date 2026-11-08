@@ -402,6 +402,39 @@ impl CipherOwner {
         })
     }
     /// Reserve exact selected-master work in the bounded private pending owner.
+    /// Keyed, non-secret fingerprint of the config master a request selects. The
+    /// module compares fingerprints to refuse two live cipher registrations on one
+    /// master; the master itself is never returned, stored or logged.
+    /// # Errors
+    /// Denies a stale, foreign or non-config master for this registration.
+    pub fn master_fingerprint(
+        &self,
+        registration: &str,
+        master: &MasterHandle,
+        generation: u64,
+    ) -> Result<[u8; 32]> {
+        let (state, _now) = self.registry.checked_lock()?;
+        let identity = handle_identity(&state.authorization_key, &master.bytes);
+        let entry = state.entries.get(&identity).ok_or(Error::NativeDenied)?;
+        if master.kind != OperationKind::NativeMasterGrant
+            || entry.kind != OperationKind::NativeMasterGrant
+            || entry.registration != registration
+            || entry.purpose != Purpose::ConfigUserMaster
+            || entry.generation != generation
+            || state.generation != generation
+        {
+            return Err(Error::NativeDenied);
+        }
+        let Material::Master(key) = &entry.material else {
+            return Err(Error::NativeDenied);
+        };
+        let key = hmac::Key::new(hmac::HMAC_SHA256, key.bytes());
+        let mut context = hmac::Context::with_key(&key);
+        context.update(b"tinysecurity/master-fingerprint/v1\0");
+        let mut output = [0; 32];
+        output.copy_from_slice(context.sign().as_ref());
+        Ok(output)
+    }
     /// # Errors
     /// Denies missing, expired, substituted or exhausted authority and oversized input.
     pub fn prepare(&self, request: CipherRequest<'_>) -> Result<CipherPending> {

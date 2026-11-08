@@ -36,6 +36,10 @@ static RUNTIME: OnceLock<Mutex<BTreeMap<String, Arc<CipherState>>>> = OnceLock::
 static CONSUMERS: OnceLock<Mutex<BTreeMap<String, ConsumerBinding>>> = OnceLock::new();
 /// The one pending inventory of every cipher, so generation activation can hold it.
 static PENDING: OnceLock<Mutex<BTreeMap<String, Pending>>> = OnceLock::new();
+/// Fingerprint of the master each live cipher registration uses. Two live
+/// registrations may not share one master, or one could open the other's
+/// ciphertext. Entries are released when their registration is retired.
+static MASTERS: OnceLock<Mutex<BTreeMap<[u8; 32], String>>> = OnceLock::new();
 type Slots = Arc<Mutex<Vec<Option<String>>>>;
 struct ConsumerBinding {
     registration: String,
@@ -49,6 +53,25 @@ fn consumers() -> &'static Mutex<BTreeMap<String, ConsumerBinding>> {
 }
 fn pending() -> &'static Mutex<BTreeMap<String, Pending>> {
     PENDING.get_or_init(Mutex::default)
+}
+fn masters() -> &'static Mutex<BTreeMap<[u8; 32], String>> {
+    MASTERS.get_or_init(Mutex::default)
+}
+fn duplicate_master() -> tinybus::Error {
+    tinybus::Error::failed("secret master already bound to another live registration")
+}
+/// Bind `fingerprint` to `registration`, refusing a master another live
+/// registration already holds. A registration holds one master at a time.
+fn bind_master(registration: &str, fingerprint: [u8; 32]) -> tinybus::Result<()> {
+    let mut masters = masters().lock().map_err(|_| denied())?;
+    match masters.get(&fingerprint) {
+        Some(owner) if owner == registration => return Ok(()),
+        Some(_) => return Err(duplicate_master()),
+        None => {}
+    }
+    masters.retain(|_, owner| owner != registration);
+    masters.insert(fingerprint, registration.into());
+    Ok(())
 }
 fn denied() -> tinybus::Error {
     tinybus::Error::failed("secret authority denied")
@@ -620,6 +643,9 @@ pub(super) fn retire(registrations: &[String]) {
     if let Ok(mut active) = runtime().lock() {
         active.retain(|id, _| !registrations.contains(id));
     }
+    if let Ok(mut masters) = masters().lock() {
+        masters.retain(|_, owner| !registrations.contains(owner));
+    }
     if let Ok(mut inventory) = pending().lock() {
         inventory.retain(|_, work| !registrations.contains(&work.request.registration_id));
     }
@@ -645,6 +671,9 @@ pub(super) fn activate(state: Option<Arc<CipherState>>) -> tinybus::Result<()> {
 pub(super) fn close_pending() {
     if let Ok(mut pending) = pending().lock() {
         pending.clear();
+    }
+    if let Ok(mut masters) = masters().lock() {
+        masters.clear();
     }
     if let Ok(mut active) = runtime().lock() {
         active.clear();
@@ -701,6 +730,15 @@ impl PolicyService {
             .map_err(|_| denied())?
             .retain(|_, pending| pending.state.owner.validate_pending(&pending.work).is_ok());
         let generation = self.read()?.info().generation;
+        // The master's fingerprint must be unique among live registrations before
+        // any ciphertext is produced or opened under it.
+        let fingerprint = state.broker.secret.master_fingerprint(
+            &state.owner,
+            &input.0.registration_id,
+            &input.0.master_handle,
+            generation,
+        )?;
+        bind_master(&input.0.registration_id, fingerprint)?;
         let metadata = metadata(&input.0);
         let work = state
             .broker

@@ -324,6 +324,27 @@ impl SecretState {
         ensure_scope_id_matches(scope_id, &canonical)?;
         Ok((descriptor, canonical))
     }
+    /// Fingerprint of the config master a cipher request selects, for the cipher's
+    /// duplicate-master check. Denies a master that is not this registration's.
+    pub(super) fn master_fingerprint(
+        &self,
+        owner: &handles::cipher::CipherOwner,
+        registration: &str,
+        master: &str,
+        generation: u64,
+    ) -> tinybus::Result<[u8; 32]> {
+        let aliases = self.aliases.lock().map_err(|_| denied())?;
+        let alias = aliases.get(master).ok_or_else(denied)?;
+        if alias.registration != registration
+            || alias.generation != generation
+            || alias.purpose != handles::Purpose::ConfigUserMaster
+        {
+            return Err(denied());
+        }
+        owner
+            .master_fingerprint(registration, &alias.handle, generation)
+            .map_err(|_| denied())
+    }
     pub(super) fn prepare_cipher(
         &self,
         owner: &handles::cipher::CipherOwner,
