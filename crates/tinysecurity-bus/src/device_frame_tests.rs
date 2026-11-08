@@ -70,8 +70,8 @@ fn frame_operations_redact_both_payloads_without_changing_open_wire_shape()
 #[test]
 fn frame_member_name_is_stable_and_contract_version_is_bumped() {
     assert_eq!(crate::names::methods::DEVICE_FRAME2, "DeviceFrame2");
-    assert_eq!(crate::CONTRACT_VERSION, (2, 0));
-    assert!(crate::is_compatible((2, 0)));
+    assert_eq!(crate::CONTRACT_VERSION, (2, 1));
+    assert!(!crate::is_compatible((2, 0)));
     assert!(crate::is_compatible((2, 1)));
     assert!(!crate::is_compatible((1, 35)));
     assert!(!crate::is_compatible((1, 36)));

@@ -117,6 +117,16 @@ fn unique_config_master_for_scope<'a>(
     }
     Ok(registration)
 }
+/// The receipt of a live registration, and whether this call created it.
+fn active(registration_id: String, created: bool) -> (SecretScopeReceipt2, bool) {
+    (
+        SecretScopeReceipt2 {
+            registration_id,
+            active: true,
+        },
+        created,
+    )
+}
 fn ensure_scope_id_matches(scope_id: &str, canonical: &ApprovalScope2) -> tinybus::Result<()> {
     if canonical.scope_id != scope_id {
         return Err(denied());
@@ -185,10 +195,9 @@ impl SecretState {
         generation: u64,
         clock: Arc<dyn tinysecurity::approval::Clock>,
     ) -> tinybus::Result<Self> {
-        if config.registrations.is_empty()
-            || config.registrations.len() > 128
-            || !(1..=30000).contains(&config.callback_timeout_ms)
-        {
+        // Zero registrations is a neutral boot: the authority exists for runtime
+        // registrations, and nothing resolves until the host registers a scope.
+        if config.registrations.len() > 128 || !(1..=30000).contains(&config.callback_timeout_ms) {
             return Err(denied());
         }
         let mut inventory = Inventory::default();
@@ -282,6 +291,13 @@ impl SecretState {
     pub(super) fn cipher_registry(&self) -> handles::Registry {
         self.registry.clone()
     }
+    /// The authenticated host every callback of this authority goes to.
+    pub(super) fn peer(&self) -> &str {
+        &self.peer
+    }
+    pub(super) fn connection(&self) -> &tinybus::Connection {
+        &self.connection
+    }
     pub(super) fn cipher_scope(&self, registration: &str) -> tinybus::Result<ApprovalScope2> {
         let reg = self.registration_id(registration)?;
         if reg.descriptor.purpose != MasterPurpose2::ConfigUserMaster {
@@ -307,6 +323,27 @@ impl SecretState {
         let canonical = registration.scope.read().map_err(|_| denied())?.clone();
         ensure_scope_id_matches(scope_id, &canonical)?;
         Ok((descriptor, canonical))
+    }
+    /// Fingerprint of the config master a cipher request selects, for the cipher's
+    /// duplicate-master check. Denies a master that is not this registration's.
+    pub(super) fn master_fingerprint(
+        &self,
+        owner: &handles::cipher::CipherOwner,
+        registration: &str,
+        master: &str,
+        generation: u64,
+    ) -> tinybus::Result<[u8; 32]> {
+        let aliases = self.aliases.lock().map_err(|_| denied())?;
+        let alias = aliases.get(master).ok_or_else(denied)?;
+        if alias.registration != registration
+            || alias.generation != generation
+            || alias.purpose != handles::Purpose::ConfigUserMaster
+        {
+            return Err(denied());
+        }
+        owner
+            .master_fingerprint(registration, &alias.handle, generation)
+            .map_err(|_| denied())
     }
     pub(super) fn prepare_cipher(
         &self,
@@ -441,22 +478,32 @@ impl SecretState {
         }
         Ok(reg)
     }
+    /// Register one runtime secret scope. `admit` runs after every registration
+    /// check and before anything is registered, so a refused cipher request
+    /// leaves no registration behind. Answers whether a new registration was made
+    /// (`false` for an identical repeat, which `admit` never sees).
     pub(super) fn register_scope(
         &self,
         request: RegisterSecretScopeRequest2,
         engine: &tinysecurity::approval::Engine,
-    ) -> tinybus::Result<SecretScopeReceipt2> {
+        admit: impl FnOnce() -> tinybus::Result<()>,
+    ) -> tinybus::Result<(SecretScopeReceipt2, bool)> {
+        let cipher = request.cipher;
         let descriptor = request.registration;
+        // Only a ConfigUserMaster registration can own a cipher. Refuse before any
+        // native registration: a later cipher build failure would roll that
+        // registration back and tombstone its id for every retry.
+        if cipher.is_some() && descriptor.purpose != MasterPurpose2::ConfigUserMaster {
+            return Err(denied());
+        }
         let scope = engine
             .scope_snapshot(&descriptor.approval_scope_id)
             .map_err(approval_failure)?;
         let registration_id = descriptor.registration_id.clone();
         if let Some(existing) = self.registered.get(&registration_id) {
-            return if existing.descriptor == descriptor {
-                Ok(SecretScopeReceipt2 {
-                    registration_id,
-                    active: true,
-                })
+            // A static registration keeps its init-owned cipher, if any.
+            return if existing.descriptor == descriptor && cipher.is_none() {
+                Ok(active(registration_id, false))
             } else {
                 Err(denied())
             };
@@ -464,11 +511,10 @@ impl SecretState {
 
         let mut dynamic = self.dynamic.lock().map_err(|_| denied())?;
         if let Some(existing) = dynamic.get(&registration_id) {
-            return if existing.descriptor == descriptor {
-                Ok(SecretScopeReceipt2 {
-                    registration_id,
-                    active: true,
-                })
+            return if existing.descriptor == descriptor
+                && super::cipher::matches_runtime(&registration_id, cipher.as_ref())?
+            {
+                Ok(active(registration_id, false))
             } else {
                 Err(denied())
             };
@@ -480,6 +526,7 @@ impl SecretState {
             inventory.admit(&existing.descriptor, &live_scope, scope.generation)?;
         }
         inventory.admit(&descriptor, &scope, scope.generation)?;
+        admit()?;
 
         let native = handles::Registration {
             id: registration_id.clone(),
@@ -540,10 +587,7 @@ impl SecretState {
                 resolver,
             }),
         );
-        Ok(SecretScopeReceipt2 {
-            registration_id,
-            active: true,
-        })
+        Ok(active(registration_id, true))
     }
     pub(super) fn retire_approval_scope(&self, scope_id: &str) -> tinybus::Result<()> {
         let mut dynamic = self.dynamic.lock().map_err(|_| denied())?;
@@ -578,6 +622,7 @@ impl SecretState {
             .lock()
             .map_err(|_| denied())?
             .retain(|_, alias| !ids.contains(&alias.registration));
+        super::cipher::retire(&ids);
         Ok(())
     }
     pub(super) fn refresh_approval_scope(
@@ -613,12 +658,16 @@ impl SecretState {
                 .map_err(|_| denied())?;
             *current = scope.clone();
         }
+        // Static and runtime registrations both keep their pending work. Only
+        // entries of this scope, and orphans of no live registration, are dropped.
+        let dynamic = self.dynamic.lock().map_err(|_| denied())?;
         self.pending
             .lock()
             .map_err(|_| denied())?
             .retain(|(registration, _), _| {
                 self.registered
                     .get(registration)
+                    .or_else(|| dynamic.get(registration))
                     .is_some_and(|entry| entry.descriptor.approval_scope_id != scope_id)
             });
         Ok(())

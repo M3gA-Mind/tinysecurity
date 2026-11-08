@@ -1171,6 +1171,13 @@ impl Engine {
         }
         Ok(())
     }
+    /// The audit stream a runtime scope registered with; `None` for an init scope,
+    /// which shares the base stream.
+    /// # Errors
+    /// Denies an unknown scope and fails on a poisoned scope table.
+    pub fn scope_audit_stream(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.entry(id)?.audit_stream_id.clone())
+    }
     /// Exact approval-owned policy digest for trusted native registration composition.
     /// # Errors
     /// Rejects unknown registrations.

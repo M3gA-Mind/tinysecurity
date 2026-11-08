@@ -52,3 +52,24 @@ fn a_released_pin_is_reclaimed_after_the_window_and_the_table_is_bounded() {
     // Unpinning an unknown subject is harmless.
     assert!(pins.unpin(&subject("unknown")).is_ok());
 }
+
+#[test]
+fn one_owner_releasing_a_subject_keeps_the_stream_for_the_others() {
+    // Zero retention: a release that really freed the subject would free it at once.
+    let pins = StreamPins {
+        ttl: Duration::ZERO,
+        ..StreamPins::default()
+    };
+    let user = subject("shared");
+    assert!(pins.pin_for(&user, FIRST, Owner::Approval).is_ok());
+    assert!(pins.pin_for(&user, FIRST, Owner::Sandbox).is_ok());
+    assert!(pins.unpin_for(&user, Owner::Sandbox).is_ok());
+    // The approval scope still holds the stream, so a second stream stays refused.
+    assert!(matches!(
+        pins.pin_for(&user, SECOND, Owner::Sandbox),
+        Err(Error::Conflict)
+    ));
+    assert!(pins.unpin_for(&user, Owner::Approval).is_ok());
+    // Only the last holder's release starts the retention clock.
+    assert!(pins.pin_for(&user, SECOND, Owner::Sandbox).is_ok());
+}

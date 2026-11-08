@@ -1,6 +1,6 @@
 //! Bounded exact approval callback clients, fixed to the trusted unique init peer.
 use crate::callbacks::{AuditClient, PeerBinding};
-use crate::stream_pins::StreamPins;
+use crate::stream_pins::{Owner, StreamPins};
 use std::sync::{Arc, RwLock};
 use tinysecurity::approval::{Error, NativeAuditAcknowledgement, Ports, Result};
 use tinysecurity_bus::{
@@ -171,8 +171,9 @@ pub(crate) struct ApprovalClients {
     audit: RwLock<Vec<(SubjectScope, Arc<AuditClient>)>>,
     /// Runtime subjects forward audit to the host sink under this base policy.
     runtime: RuntimeAudit,
-    /// The audit stream of each runtime subject; see [`StreamPins`].
-    pins: StreamPins,
+    /// The audit stream of each runtime subject; see [`StreamPins`]. Shared with
+    /// the init audit client through [`ApprovalClients::with_pins`].
+    pins: Arc<StreamPins>,
     #[cfg(test)]
     test_ordinary_calls: bool,
 }
@@ -223,10 +224,21 @@ impl ApprovalClients {
             store,
             audit: RwLock::new(clients),
             runtime,
-            pins: StreamPins::default(),
+            pins: Arc::new(StreamPins::default()),
             #[cfg(test)]
             test_ordinary_calls: false,
         })
+    }
+    /// Admit runtime subjects through the same stream table as `RecordAudit2`, so a
+    /// host record can never move an approved subject to a second ledger.
+    pub(crate) fn with_pins(mut self, pins: Arc<StreamPins>) -> Result<Self> {
+        // Initialized scopes are never released, so their subjects hold the init
+        // stream in the shared table for the life of the process.
+        for (_, client) in self.audit.read().map_err(|_| Error::Unavailable)?.iter() {
+            pins.pin_for(client.scope(), client.stream_id(), Owner::Approval)?;
+        }
+        self.pins = pins;
+        Ok(self)
     }
     /// Build a client for unit tests that use unauthenticated `MemoryBus` mocks.
     /// Production and binding-backed tests always use confidential callback calls.
@@ -347,7 +359,8 @@ impl Ports for ApprovalClients {
     }
     async fn admit_scope(&self, scope: &ApprovalScope2, audit_stream_id: &str) -> Result<()> {
         let handle = tinysecurity::approval::scope_handle(&scope.subject)?;
-        self.pins.pin(&scope.subject, audit_stream_id)?;
+        self.pins
+            .pin_for(&scope.subject, audit_stream_id, Owner::Approval)?;
         let client = Arc::new(self.runtime_client(scope, audit_stream_id)?);
         self.store.admit(handle.clone())?;
         // The engine serializes lifecycles, so an existing client is stale (for
@@ -363,7 +376,7 @@ impl Ports for ApprovalClients {
             .write()
             .map_err(|_| Error::Unavailable)?
             .retain(|(s, _)| s != &handle);
-        self.pins.unpin(&scope.subject)?;
+        self.pins.unpin_for(&scope.subject, Owner::Approval)?;
         self.store.release(&handle)
     }
     async fn native_audit(&self, row: ApprovalRow2) -> Result<NativeAuditAcknowledgement> {

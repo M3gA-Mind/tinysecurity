@@ -525,8 +525,8 @@ impl Registry {
         limits: Limits,
         clock: Arc<dyn NativeClock>,
     ) -> Result<Self> {
-        if registrations.is_empty()
-            || registrations.len() > MAX_NATIVE_SCOPES
+        // An empty list is a neutral registry: scopes arrive through `register_scope`.
+        if registrations.len() > MAX_NATIVE_SCOPES
             || !peer.starts_with(':')
             || !text(peer)
             || generation == 0

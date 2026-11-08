@@ -119,8 +119,9 @@ pub(crate) struct AuditClient {
     config: tinysecurity_bus::AuditConfig2,
     redactor: std::sync::RwLock<tinysecurity::Redactor>,
     native: Option<std::sync::Arc<tinysecurity::audit::JsonlSink>>,
-    /// The stream each host-recorded subject is bound to (`RecordAudit2`).
-    pins: crate::stream_pins::StreamPins,
+    /// The stream each host-recorded subject is bound to (`RecordAudit2`). Shared
+    /// with approval admission so one subject has exactly one ledger.
+    pins: std::sync::Arc<crate::stream_pins::StreamPins>,
     #[cfg(test)]
     pub(crate) test_ordinary_calls: bool,
 }
@@ -172,16 +173,29 @@ impl AuditClient {
             })
             .transpose()
             .map_err(|_| tinybus::Error::failed("unavailable restricted audit storage"))?;
+        // The init subject lives only in the init stream. Pinning it up front stops any
+        // other path from claiming another stream for it before host-recorded audit runs.
+        let pins = crate::stream_pins::StreamPins::default();
+        pins.pin_for(
+            &config.scope,
+            &config.stream_id,
+            crate::stream_pins::Owner::Recorded,
+        )
+        .map_err(|_| tinybus::Error::failed("audit stream pin unavailable"))?;
         Ok(Self {
             connection,
             binding,
             config,
             redactor: std::sync::RwLock::new(redactor),
             native,
-            pins: crate::stream_pins::StreamPins::default(),
+            pins: std::sync::Arc::new(pins),
             #[cfg(test)]
             test_ordinary_calls: false,
         })
+    }
+    /// The stream pin table of this client's subjects, shared with approval admission.
+    pub(crate) fn pins(&self) -> std::sync::Arc<crate::stream_pins::StreamPins> {
+        std::sync::Arc::clone(&self.pins)
     }
     /// Use ordinary mock-bus callbacks in unit tests without confidential module
     /// provenance. Production clients always use confidential callback calls.
@@ -216,32 +230,25 @@ impl AuditClient {
             health: AuditHealth2::Denied,
             receipt: None,
         };
+        // The init subject lives only in the init stream: an alternate stream would
+        // split its history across ledgers, and the init sink never sees it.
         if request.validate().is_err()
             || request.audit.generation != generation
-            || self.pins.pin(&request.subject, &request.stream_id).is_err()
+            || (request.subject == self.config.scope && request.stream_id != self.config.stream_id)
+            || self
+                .pins
+                .pin_for(
+                    &request.subject,
+                    &request.stream_id,
+                    crate::stream_pins::Owner::Recorded,
+                )
+                .is_err()
         {
             return denied();
         }
-        let mut config = self.config.clone();
-        config.scope = request.subject.clone();
-        config.stream_id = request.stream_id.clone();
-        // Subjects other than the init one always forward to the host sink.
-        config.native_path = None;
-        #[cfg(test)]
-        let client = Self::new_for_test(
-            self.connection.clone(),
-            self.binding.clone(),
-            config,
-            redactor.clone(),
-        );
-        #[cfg(not(test))]
-        let client = Self::new(
-            self.connection.clone(),
-            self.binding.clone(),
-            config,
-            redactor.clone(),
-        );
-        let Ok(client) = client else {
+        let Ok(client) =
+            self.subject_client(&request.subject, &request.stream_id, redactor.clone())
+        else {
             return denied();
         };
         let Some(sequence) = request.audit.expected_tail.checked_add(1) else {
@@ -262,6 +269,66 @@ impl AuditClient {
             }],
         };
         client.append_with_registry(batch, Ok(redactor)).await
+    }
+    /// A host-sink client of one subject's stream. Subjects other than the init
+    /// one always forward to the host sink, never to the init native journal.
+    fn subject_client(
+        &self,
+        subject: &tinysecurity_bus::SubjectScope,
+        stream_id: &str,
+        redactor: tinysecurity::Redactor,
+    ) -> Result<Self> {
+        let mut config = self.config.clone();
+        config.scope = subject.clone();
+        config.stream_id = stream_id.into();
+        config.native_path = None;
+        #[cfg(test)]
+        let client = Self::new_for_test(
+            self.connection.clone(),
+            self.binding.clone(),
+            config,
+            redactor,
+        );
+        #[cfg(not(test))]
+        let client = Self::new(
+            self.connection.clone(),
+            self.binding.clone(),
+            config,
+            redactor,
+        );
+        client
+    }
+    /// The client of one registration's audit subject and stream.
+    ///
+    /// The init subject keeps the init stream and storage; any other stream for it
+    /// is refused. Another subject is pinned to its stream exactly like
+    /// `RecordAudit2` pins it, so a subject never writes to two ledgers.
+    pub(crate) fn for_subject(
+        &self,
+        subject: &tinysecurity_bus::SubjectScope,
+        stream_id: &str,
+    ) -> Result<Self> {
+        let refused = || tinybus::Error::failed("audit stream conflict");
+        if subject == &self.config.scope {
+            if stream_id != self.config.stream_id {
+                return Err(refused());
+            }
+            let mut client = self.subject_client(subject, stream_id, self.registry()?)?;
+            client
+                .config
+                .native_path
+                .clone_from(&self.config.native_path);
+            client.native.clone_from(&self.native);
+            #[cfg(test)]
+            {
+                client.test_ordinary_calls = self.test_ordinary_calls;
+            }
+            return Ok(client);
+        }
+        self.pins
+            .pin_for(subject, stream_id, crate::stream_pins::Owner::Recorded)
+            .map_err(|_| refused())?;
+        self.subject_client(subject, stream_id, self.registry()?)
     }
     pub(crate) fn registry(&self) -> Result<tinysecurity::Redactor> {
         self.redactor

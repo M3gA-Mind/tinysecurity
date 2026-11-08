@@ -74,6 +74,8 @@ resolution; enabled policy adds action-root, workspace and forbidden-root
 checks. Enabled writes require the durable approval surface. Pure local
 diagnostics work with disabled autonomy, which is the default.
 
+The detailed notes for runtime approval scopes, host tools and approval origin classes are in [docs/module-approval-contracts.md](docs/module-approval-contracts.md); `MODULE.md` keeps a summary and the same anchors.
+
 This is bootstrap infrastructure for [OpenHuman #7328](https://github.com/tinyhumansai/openhuman/issues/7328)
 and [TinySecurity #1](https://github.com/tinyhumansai/tinysecurity/issues/1).
 It does **not** complete the migration. Concrete sandbox spawning, connection pinning and production host configuration/adapter migration remain unavailable. Linux release artifacts are built without the opt-in Secret Service backend so they link only the base C runtime and load on minimal server images; the backend fails closed unless a build enables `keyring-secret-service`. Contract 1.25 supplies the module-owned pairing and tunnel lifecycle; the host must provide the server-trusted controller/socket/reconnect callbacks and encrypted persistence plumbing described in its specification. The optional [native device handle surface](MODULE.md#confidential-device-handles) uses authenticated confidential calls; initial master unlock remains HumanOnly. Reserved wire types do not advertise callable handlers.

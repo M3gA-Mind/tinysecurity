@@ -1092,7 +1092,9 @@ async fn released_subjects_keep_their_stream_only_for_the_retention_window_and_p
         &native_audit_config(base.scopes[0].subject.clone(), false),
         &redactor,
     )?;
-    clients.pins.max = 2;
+    std::sync::Arc::get_mut(&mut clients.pins)
+        .ok_or("stream pins already shared")?
+        .max = 2;
     let (first, second, third) = (runtime_scope(11), runtime_scope(12), runtime_scope(13));
     clients.admit_scope(&first, &"d".repeat(32)).await?;
     clients.admit_scope(&second, &"d".repeat(32)).await?;
@@ -1103,7 +1105,9 @@ async fn released_subjects_keep_their_stream_only_for_the_retention_window_and_p
     assert!(clients.admit_scope(&first, &"e".repeat(32)).await.is_err());
     assert!(clients.admit_scope(&third, &"d".repeat(32)).await.is_err());
     // Past the window the pin is reclaimed and the subject may use another stream.
-    clients.pins.ttl = std::time::Duration::ZERO;
+    std::sync::Arc::get_mut(&mut clients.pins)
+        .ok_or("stream pins already shared")?
+        .ttl = std::time::Duration::ZERO;
     clients.admit_scope(&third, &"d".repeat(32)).await?;
     // The table is full of live pins again, so a reclaimed subject must wait.
     assert!(clients.admit_scope(&first, &"e".repeat(32)).await.is_err());

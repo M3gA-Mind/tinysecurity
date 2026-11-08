@@ -1502,15 +1502,39 @@ impl PolicyService {
         // The TinyBus interface is asynchronous; registration itself only
         // updates the already-live in-process registries.
         std::future::ready(()).await;
-        self.secret
+        let secret = self
+            .secret
             .as_ref()
-            .ok_or_else(|| tinybus::Error::failed("secret authority unavailable"))?
-            .register_scope(
-                request,
-                self.approvals
-                    .as_ref()
-                    .ok_or_else(|| tinybus::Error::failed("approval unavailable"))?,
-            )
+            .ok_or_else(|| tinybus::Error::failed("secret authority unavailable"))?;
+        let engine = self
+            .approvals
+            .as_ref()
+            .ok_or_else(|| tinybus::Error::failed("approval unavailable"))?;
+        let registration_id = request.registration.registration_id.clone();
+        let scope_id = request.registration.approval_scope_id.clone();
+        let requested = request.cipher.clone();
+        let runtime = requested.as_ref().map(|cipher| cipher::RuntimeRequest {
+            registration_id: &registration_id,
+            approval_scope_id: &scope_id,
+            cipher,
+            engine,
+            audit: self.audit.as_ref(),
+            static_cipher: self.secret_cipher.as_deref(),
+        });
+        let (receipt, created) = secret.register_scope(request, engine, || {
+            runtime
+                .as_ref()
+                .map_or(Ok(()), |runtime| runtime.check().map(drop))
+        })?;
+        if created
+            && let Some(runtime) = &runtime
+            && let Err(error) = cipher::register(runtime, secret)
+        {
+            // Never leave a master registered without the cipher it asked for.
+            secret.retire_approval_scope(&scope_id)?;
+            return Err(error);
+        }
+        Ok(receipt)
     }
     // Private host-only registration. The module resolves the live approval
     // scope and derives all pairing and master bindings from trusted state.
@@ -1615,7 +1639,7 @@ impl PolicyService {
         info.callbacks.approvals = self.approvals.is_some();
         info.callbacks.sandbox = self.sandbox.is_some();
         info.callbacks.secret = self.secret.is_some();
-        info.callbacks.secret_cipher = self.secret_cipher.is_some();
+        info.callbacks.secret_cipher = self.secret_cipher.is_some() || cipher::runtime_active();
         info.callbacks.device = self.device.is_some();
         info.callbacks.crypto = self.crypto.is_some();
         info.scoped_policies = self
@@ -2010,6 +2034,7 @@ fn configured_approvals(
     requested_host: Option<&str>,
     approval_config: Option<tinysecurity_bus::ApprovalConfig2>,
     audit_config: Option<&tinysecurity_bus::AuditConfig2>,
+    audit_pins: Option<Arc<crate::stream_pins::StreamPins>>,
     candidate: &Policy,
     current: Option<
         &Option<(
@@ -2049,13 +2074,17 @@ fn configured_approvals(
                 }
                 let audit_config = audit_config
                     .ok_or_else(|| tinybus::Error::failed("approval audit unavailable"))?;
+                let audit_pins = audit_pins
+                    .ok_or_else(|| tinybus::Error::failed("approval audit unavailable"))?;
                 let ports = crate::approval_callbacks::ApprovalClients::new(
                     connection,
                     requested_host,
                     &config,
                     audit_config,
                     &candidate.redactor(),
-                )?;
+                )?
+                .with_pins(audit_pins)
+                .map_err(|_| tinybus::Error::failed("approval pins unavailable"))?;
                 let engine = tinysecurity::approval::Engine::new(
                     config.clone(),
                     Arc::new(ports),
@@ -2199,15 +2228,13 @@ fn activate_authorities(
     generation: u64,
     publish: impl FnOnce() -> BusResult<()>,
 ) -> BusResult<()> {
-    let cipher_prepared = cipher::prepare_generation()?;
+    let mut cipher_prepared = cipher::prepare_generation()?;
     let secret_prepared = secret::prepare_generation(secret, generation)?;
     device::transition(device, device_limits, generation, publish)?;
     if let Some(prepared) = secret_prepared {
         prepared.commit();
     }
-    if let Some(mut pending) = cipher_prepared {
-        pending.clear();
-    }
+    cipher_prepared.clear();
     Ok(())
 }
 fn publish_policy_generation(
@@ -2363,6 +2390,7 @@ async fn setup(connection: Connection, mut config: ModuleConfig) -> BusResult<()
         requested_host.as_deref(),
         approval_config.clone(),
         audit_config.as_ref(),
+        audit.as_ref().map(|client| client.pins()),
         &candidate,
         APPROVALS.get(),
     )?;
@@ -2425,6 +2453,7 @@ async fn setup(connection: Connection, mut config: ModuleConfig) -> BusResult<()
         sandbox.as_ref().map(|(_, engine)| engine),
         audit_config,
         (&connection, &binding),
+        audit.as_ref().map(|client| client.pins()),
     )?;
     service.approvals = approvals.as_ref().map(|(_, engine)| Arc::clone(engine));
     if let Some(engine) = &service.approvals {
