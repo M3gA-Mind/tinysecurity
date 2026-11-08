@@ -224,10 +224,16 @@ impl ApprovalClients {
             store,
             audit: RwLock::new(clients),
             runtime,
-            pins: StreamPins::default(),
+            pins: Arc::new(StreamPins::default()),
             #[cfg(test)]
             test_ordinary_calls: false,
         })
+    }
+    /// Admit runtime subjects through the same stream table as `RecordAudit2`, so a
+    /// host record can never move an approved subject to a second ledger.
+    pub(crate) fn with_pins(mut self, pins: Arc<StreamPins>) -> Self {
+        self.pins = pins;
+        self
     }
     /// Build a client for unit tests that use unauthenticated `MemoryBus` mocks.
     /// Production and binding-backed tests always use confidential callback calls.
