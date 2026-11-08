@@ -2083,7 +2083,8 @@ fn configured_approvals(
                     audit_config,
                     &candidate.redactor(),
                 )?
-                .with_pins(audit_pins);
+                .with_pins(audit_pins)
+                .map_err(|_| tinybus::Error::failed("approval pins unavailable"))?;
                 let engine = tinysecurity::approval::Engine::new(
                     config.clone(),
                     Arc::new(ports),

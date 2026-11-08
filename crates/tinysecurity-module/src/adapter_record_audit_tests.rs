@@ -299,7 +299,8 @@ async fn an_approved_runtime_subject_cannot_record_on_a_second_stream()
         &config,
         &redactor,
     )?
-    .with_pins(init.pins()).map_err(|_| "approval pins")?;
+    .with_pins(init.pins())
+    .map_err(|_| "approval pins")?;
     let approved = ApprovalScope2 {
         scope_id: "f".repeat(32),
         subject: subject("approved"),
@@ -355,7 +356,11 @@ async fn the_init_subject_cannot_be_claimed_on_another_stream()
     assert!(
         client
             .pins()
-            .pin_for(&init.scope, &init.stream_id, crate::stream_pins::Owner::Recorded)
+            .pin_for(
+                &init.scope,
+                &init.stream_id,
+                crate::stream_pins::Owner::Recorded
+            )
             .is_ok()
     );
     Ok(())
@@ -415,4 +420,3 @@ async fn an_initialized_approval_subject_keeps_its_stream_in_the_shared_table()
     );
     Ok(())
 }
-

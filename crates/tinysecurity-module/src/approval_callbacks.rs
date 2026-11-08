@@ -231,9 +231,14 @@ impl ApprovalClients {
     }
     /// Admit runtime subjects through the same stream table as `RecordAudit2`, so a
     /// host record can never move an approved subject to a second ledger.
-    pub(crate) fn with_pins(mut self, pins: Arc<StreamPins>) -> Self {
+    pub(crate) fn with_pins(mut self, pins: Arc<StreamPins>) -> Result<Self> {
+        // Initialized scopes are never released, so their subjects hold the init
+        // stream in the shared table for the life of the process.
+        for (_, client) in self.audit.read().map_err(|_| Error::Unavailable)?.iter() {
+            pins.pin_for(client.scope(), client.stream_id(), Owner::Approval)?;
+        }
         self.pins = pins;
-        self
+        Ok(self)
     }
     /// Build a client for unit tests that use unauthenticated `MemoryBus` mocks.
     /// Production and binding-backed tests always use confidential callback calls.

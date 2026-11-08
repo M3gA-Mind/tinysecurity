@@ -60,6 +60,14 @@ fn masters() -> &'static Mutex<BTreeMap<[u8; 32], String>> {
 fn duplicate_master() -> tinybus::Error {
     tinybus::Error::failed("secret master already bound to another live registration")
 }
+/// Refuse a master another live registration already holds. Nothing is bound.
+fn check_master(registration: &str, fingerprint: [u8; 32]) -> tinybus::Result<()> {
+    let masters = masters().lock().map_err(|_| denied())?;
+    match masters.get(&fingerprint) {
+        Some(owner) if owner != registration => Err(duplicate_master()),
+        _ => Ok(()),
+    }
+}
 /// Bind `fingerprint` to `registration`, refusing a master another live
 /// registration already holds. A registration keeps every fingerprint it has bound:
 /// a rotated key leaves its old handles valid, so the old fingerprint stays held
@@ -740,7 +748,7 @@ impl PolicyService {
             &input.0.master_handle,
             generation,
         )?;
-        bind_master(&input.0.registration_id, fingerprint)?;
+        check_master(&input.0.registration_id, fingerprint)?;
         let metadata = metadata(&input.0);
         let work = state
             .broker
@@ -768,6 +776,9 @@ impl PolicyService {
         {
             return Err(denied());
         }
+        // Bind only when this request is admitted, so a refused request binds nothing.
+        // The binding is atomic with the check, so two registrations cannot both win.
+        bind_master(&metadata.registration_id, fingerprint)?;
         if inventory
             .insert(
                 pending_id.clone(),

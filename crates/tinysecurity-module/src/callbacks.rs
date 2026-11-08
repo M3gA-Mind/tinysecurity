@@ -173,13 +173,22 @@ impl AuditClient {
             })
             .transpose()
             .map_err(|_| tinybus::Error::failed("unavailable restricted audit storage"))?;
+        // The init subject lives only in the init stream. Pinning it up front stops any
+        // other path from claiming another stream for it before host-recorded audit runs.
+        let pins = crate::stream_pins::StreamPins::default();
+        pins.pin_for(
+            &config.scope,
+            &config.stream_id,
+            crate::stream_pins::Owner::Recorded,
+        )
+        .map_err(|_| tinybus::Error::failed("audit stream pin unavailable"))?;
         Ok(Self {
             connection,
             binding,
             config,
             redactor: std::sync::RwLock::new(redactor),
             native,
-            pins: std::sync::Arc::new(crate::stream_pins::StreamPins::default()),
+            pins: std::sync::Arc::new(pins),
             #[cfg(test)]
             test_ordinary_calls: false,
         })
