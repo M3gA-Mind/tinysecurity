@@ -299,7 +299,7 @@ async fn an_approved_runtime_subject_cannot_record_on_a_second_stream()
         &config,
         &redactor,
     )?
-    .with_pins(init.pins());
+    .with_pins(init.pins()).map_err(|_| "approval pins")?;
     let approved = ApprovalScope2 {
         scope_id: "f".repeat(32),
         subject: subject("approved"),
@@ -334,3 +334,85 @@ async fn an_approved_runtime_subject_cannot_record_on_a_second_stream()
     );
     Ok(())
 }
+#[tokio::test]
+async fn the_init_subject_cannot_be_claimed_on_another_stream()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (service, _rows, _host) = recording_service(true, true).await?;
+    let client = service.audit.as_ref().ok_or("audit client")?;
+    let init = permission_audit_config(true);
+    // A sandbox or approval path must not pin the init subject to another stream
+    // before host-recorded audit ever runs.
+    assert!(
+        client
+            .pins()
+            .pin_for(
+                &init.scope,
+                &"c".repeat(32),
+                crate::stream_pins::Owner::Sandbox
+            )
+            .is_err()
+    );
+    assert!(
+        client
+            .pins()
+            .pin_for(&init.scope, &init.stream_id, crate::stream_pins::Owner::Recorded)
+            .is_ok()
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn an_initialized_approval_subject_keeps_its_stream_in_the_shared_table()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use tinysecurity_bus::{AccessTier, ApprovalConfig2, ApprovalScope2};
+    let bus = MemoryBus::new();
+    let broker = Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await?).await?;
+    let module = Connection::connect(bus.connect().await?).await?;
+    let peer = host.unique_name().ok_or("host peer")?;
+    let _fixture = Fixture {
+        _host: host,
+        broker,
+    };
+    let config = permission_audit_config(true);
+    let redactor = tinysecurity::Redactor::new(&RedactorConfig::default())?;
+    let init = crate::callbacks::AuditClient::new_for_test(
+        module.clone(),
+        crate::callbacks::PeerBinding::new(Some(peer.as_str()))?,
+        config.clone(),
+        redactor.clone(),
+    )?;
+    let approval_subject = subject("init-approval");
+    let approvals = crate::approval_callbacks::ApprovalClients::new(
+        &module,
+        Some(peer.as_str()),
+        &ApprovalConfig2 {
+            timeout_ms: 30_000,
+            scopes: vec![ApprovalScope2 {
+                scope_id: "e".repeat(32),
+                subject: approval_subject.clone(),
+                policy_ref: "scope".into(),
+                generation: 1,
+                ceiling: AccessTier::Full,
+                require_approval: true,
+                auto_approve_all: false,
+            }],
+        },
+        &config,
+        &redactor,
+    )?;
+    let _approvals = approvals
+        .with_pins(init.pins())
+        .map_err(|_| "approval pins")?;
+    // The initialized approval subject holds the init stream for good.
+    assert!(
+        init.pins()
+            .pin_for(
+                &approval_subject,
+                &"c".repeat(32),
+                crate::stream_pins::Owner::Sandbox
+            )
+            .is_err()
+    );
+    Ok(())
+}
+

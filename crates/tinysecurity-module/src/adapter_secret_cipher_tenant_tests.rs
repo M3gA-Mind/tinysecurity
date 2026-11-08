@@ -103,7 +103,7 @@ pub(in super::super) fn tenant_targets(mode: u32) -> BTreeMap<String, Zeroizing<
         targets.insert(TENANTS[1].backend_id(), TENANTS[0].key());
         targets.insert(PROBE.backend_id(), TENANTS[0].key());
     }
-    if mode == 49 {
+    if mode == 49 || mode == 50 {
         targets.insert(TENANTS[1].backend_id(), TENANTS[0].key());
     }
     targets
@@ -655,6 +655,7 @@ impl Control {
         let rotated = self
             .tenant_master_call(proxy, one, "tenant-one-rotated".into())
             .await?;
+        assert_ne!(first, rotated, "a rotated key loads a new master handle");
         self.encrypt(proxy, one, &rotated, "after", b"new-key")
             .await?;
         assert!(
@@ -663,6 +664,24 @@ impl Control {
                 .is_err(),
             "rotating a key must not free its old fingerprint for another registration"
         );
+        Ok(())
+    }
+    /// Mode 50: a request refused after its master is checked binds nothing, so the
+    /// master stays available to another registration.
+    async fn tenant_refused_request_binds_nothing(
+        &self,
+        proxy: &tinybus::Proxy,
+    ) -> tinybus::Result<()> {
+        self.register_tenants(proxy).await?;
+        let [one, two] = &TENANTS;
+        // Mode 50 gives tenant two tenant one's original key bytes.
+        let first = self.tenant_master(proxy, one).await?;
+        let mut malformed =
+            Self::cipher_request(one, &first, "malformed", SecretCipherKind2::Encrypt, b"x");
+        malformed.input = vec![b'x'; (1 << 20) + 1];
+        assert!(self.evaluate(proxy, &malformed).await.is_err());
+        let second = self.tenant_master(proxy, two).await?;
+        self.encrypt(proxy, two, &second, "own", b"two").await?;
         Ok(())
     }
     /// Mode 46: replacing one tenant's approval scope drops only that scope's
@@ -777,6 +796,7 @@ impl Control {
             46 => self.tenant_pending_survives_other_scope(proxy).await?,
             48 => self.tenant_duplicate_master_is_refused(proxy).await?,
             49 => self.tenant_rotated_master_stays_bound(proxy).await?,
+            50 => self.tenant_refused_request_binds_nothing(proxy).await?,
             _ => return Err(denied()),
         }
         Ok(serde_json::json!({"tenants": true}))
@@ -854,6 +874,10 @@ async fn runtime_tenants_work_after_a_neutral_boot_and_retire_alone() -> TestRes
         45,
     )
     .await
+}
+#[tokio::test]
+async fn a_refused_request_binds_no_master() -> TestResult {
+    tenant_fixture("a_refused_request_binds_no_master", 50).await
 }
 #[tokio::test]
 async fn a_rotated_master_keeps_its_fingerprint_bound() -> TestResult {
