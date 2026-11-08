@@ -119,8 +119,9 @@ pub(crate) struct AuditClient {
     config: tinysecurity_bus::AuditConfig2,
     redactor: std::sync::RwLock<tinysecurity::Redactor>,
     native: Option<std::sync::Arc<tinysecurity::audit::JsonlSink>>,
-    /// The stream each host-recorded subject is bound to (`RecordAudit2`).
-    pins: crate::stream_pins::StreamPins,
+    /// The stream each host-recorded subject is bound to (`RecordAudit2`). Shared
+    /// with approval admission so one subject has exactly one ledger.
+    pins: std::sync::Arc<crate::stream_pins::StreamPins>,
     #[cfg(test)]
     pub(crate) test_ordinary_calls: bool,
 }
