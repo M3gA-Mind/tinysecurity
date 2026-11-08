@@ -55,9 +55,11 @@ fn a_released_pin_is_reclaimed_after_the_window_and_the_table_is_bounded() {
 
 #[test]
 fn one_owner_releasing_a_subject_keeps_the_stream_for_the_others() {
-    let mut pins = StreamPins::default();
     // Zero retention: a release that really freed the subject would free it at once.
-    pins.ttl = Duration::ZERO;
+    let pins = StreamPins {
+        ttl: Duration::ZERO,
+        ..StreamPins::default()
+    };
     let user = subject("shared");
     assert!(pins.pin_for(&user, FIRST, Owner::Approval).is_ok());
     assert!(pins.pin_for(&user, FIRST, Owner::Sandbox).is_ok());
