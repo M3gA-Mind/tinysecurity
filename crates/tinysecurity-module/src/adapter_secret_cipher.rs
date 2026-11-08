@@ -799,14 +799,11 @@ impl PolicyService {
             .validate_pending(&pending.work)
             .map_err(|_| denied())?;
         execution?.verify(&operation, "execution", generation)?;
-        let completed = match state.owner.execute_guarded(pending.work).await {
-            Ok(completed) => completed,
-            Err(_) => {
-                // Refused before delivery (for example, ciphertext that does not
-                // authenticate): the slot is free again. Refused after delivery stays fenced.
-                lease.release_unattempted();
-                return Err(denied());
-            }
+        let Ok(completed) = state.owner.execute_guarded(pending.work).await else {
+            // Refused before delivery (for example, ciphertext that does not
+            // authenticate): the slot is free again. Refused after delivery stays fenced.
+            lease.release_unattempted();
+            return Err(denied());
         };
         completed.validate().map_err(|_| denied())?;
         let staged = lease.context.staged.lock().map_err(|_| denied())?.clone();
