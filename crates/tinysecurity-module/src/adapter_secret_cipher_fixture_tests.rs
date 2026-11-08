@@ -610,4 +610,4 @@ async fn actual_confidential_cipher_dispatch_stages_only_at_fixed_slots_and_fail
 
 #[path = "adapter_secret_cipher_tenant_tests.rs"]
 mod tenants;
-pub(super) use tenants::{TENANT_MODES, TENANTS, registered_consumer};
+pub(super) use tenants::{TENANT_MODES, TENANTS, registered_consumer, tenant_targets};
