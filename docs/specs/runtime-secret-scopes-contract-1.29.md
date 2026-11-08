@@ -49,8 +49,10 @@ The module enforces tenant isolation itself:
 
 - Every `EvaluateSecretCipher2` and `ExecuteSecretCipher2` call selects its
   cipher by `request.registration_id`. A master handle works only with the
-  registration that acquired it. While two cipher registrations are live they
-  cannot hold the same master (see the fingerprint rule below). The cipher does
+  registration that acquired it. Two live cipher registrations cannot both use
+  the same master for cipher work: the second is refused at its first cipher
+  request (see the fingerprint rule below). Acquiring the master alone is not
+  refused. The cipher does
   not bind ciphertext to a registration, so a registration that acquires a master
   after another registration's retirement can open ciphertext sealed under that
   master. Retirement releases the fingerprint, and the isolation guarantee covers
@@ -75,7 +77,7 @@ The module enforces tenant isolation itself:
   stream in the same process. Approval scopes, sandbox scopes and host-recorded
   audit each hold a subject's pin separately; a release by one path frees the
   stream only after the last holder lets go.
-- Two live cipher registrations never share one master. At each cipher request
+- Two live cipher registrations never both use one master for cipher work. At each cipher request
   the module computes a keyed, non-secret fingerprint of the registration's
   master (HMAC-SHA256 keyed by the master over the label
   `tinysecurity/master-fingerprint/v1`) and binds it to the registration. A second
