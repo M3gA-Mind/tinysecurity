@@ -171,8 +171,9 @@ pub(crate) struct ApprovalClients {
     audit: RwLock<Vec<(SubjectScope, Arc<AuditClient>)>>,
     /// Runtime subjects forward audit to the host sink under this base policy.
     runtime: RuntimeAudit,
-    /// The audit stream of each runtime subject; see [`StreamPins`].
-    pins: StreamPins,
+    /// The audit stream of each runtime subject; see [`StreamPins`]. Shared with
+    /// the init audit client through [`ApprovalClients::with_pins`].
+    pins: Arc<StreamPins>,
     #[cfg(test)]
     test_ordinary_calls: bool,
 }
