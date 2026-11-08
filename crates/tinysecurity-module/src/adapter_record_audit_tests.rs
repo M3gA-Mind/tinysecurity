@@ -279,7 +279,15 @@ async fn an_approved_runtime_subject_cannot_record_on_a_second_stream()
         Some(peer.as_str()),
         &ApprovalConfig2 {
             timeout_ms: 30_000,
-            scopes: vec![],
+            scopes: vec![ApprovalScope2 {
+                scope_id: "a".repeat(32),
+                subject: config.scope.clone(),
+                policy_ref: "scope".into(),
+                generation: 1,
+                ceiling: AccessTier::Full,
+                require_approval: true,
+                auto_approve_all: false,
+            }],
         },
         &config,
         &redactor,
