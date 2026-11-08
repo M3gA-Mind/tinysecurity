@@ -644,11 +644,55 @@ impl Control {
             )
             .await?;
         assert_eq!(row.state, ApprovalLifecycle2::Pending);
+        // Tenant two's own request is decided before its scope is replaced.
+        let two_request = SecretRequest2 {
+            registration_id: two.registration_id(),
+            call_id: "tenant-two-pending".into(),
+            ttl_ms: 30000,
+            operation: SecretOperation2::ResolveConfigMaster,
+        };
+        let two_row: ApprovalRow2 = proxy
+            .call_confidential(
+                names::methods::EVALUATE_SECRET2,
+                (EvaluateSecretRequest2 {
+                    request: two_request.clone(),
+                    audit: self.next_audit(),
+                },),
+            )
+            .await?;
+        assert_eq!(two_row.state, ApprovalLifecycle2::Pending);
+        let two_approved: ApprovalRow2 = proxy
+            .call(
+                names::methods::DECIDE2,
+                (DecideRequest2 {
+                    scope_id: two.scope_id(),
+                    request_id: two_row.request_id.clone(),
+                    decision_ticket: "actual-fixture-human-ticket".into(),
+                    audit: self.next_audit(),
+                },),
+            )
+            .await?;
+        assert_eq!(two_approved.choice, Some(ApprovalChoice2::Once));
         let mut replacement = two.approval();
         replacement.scope.policy_ref = "tenant-two-replaced".into();
         let _: ApprovalScopeReceipt2 = proxy
             .call(names::methods::REPLACE_APPROVAL_SCOPE2, (&replacement,))
             .await?;
+        // The replaced scope's decided request is gone, so its execution is refused.
+        assert!(
+            proxy
+                .call_confidential::<SecretResponse2>(
+                    names::methods::EXECUTE_SECRET2,
+                    (&ExecuteSecretRequest2 {
+                        request: two_request,
+                        request_id: two_row.request_id,
+                        audit: self.next_audit(),
+                    },),
+                )
+                .await
+                .is_err(),
+            "replacing a scope drops the replaced scope's pending master request"
+        );
         let approved: ApprovalRow2 = proxy
             .call(
                 names::methods::DECIDE2,
