@@ -61,17 +61,19 @@ fn duplicate_master() -> tinybus::Error {
     tinybus::Error::failed("secret master already bound to another live registration")
 }
 /// Bind `fingerprint` to `registration`, refusing a master another live
-/// registration already holds. A registration holds one master at a time.
+/// registration already holds. A registration keeps every fingerprint it has bound:
+/// a rotated key leaves its old handles valid, so the old fingerprint stays held
+/// until the registration is retired.
 fn bind_master(registration: &str, fingerprint: [u8; 32]) -> tinybus::Result<()> {
     let mut masters = masters().lock().map_err(|_| denied())?;
     match masters.get(&fingerprint) {
-        Some(owner) if owner == registration => return Ok(()),
-        Some(_) => return Err(duplicate_master()),
-        None => {}
+        Some(owner) if owner == registration => Ok(()),
+        Some(_) => Err(duplicate_master()),
+        None => {
+            masters.insert(fingerprint, registration.into());
+            Ok(())
+        }
     }
-    masters.retain(|_, owner| owner != registration);
-    masters.insert(fingerprint, registration.into());
-    Ok(())
 }
 fn denied() -> tinybus::Error {
     tinybus::Error::failed("secret authority denied")

@@ -644,21 +644,23 @@ impl Control {
         let [one, two] = &TENANTS;
         // Mode 49 gives tenant two tenant one's original key bytes.
         let first = self.tenant_master(proxy, one).await?;
-        self.encrypt(proxy, one, &first, "before", b"old-key").await?;
+        self.encrypt(proxy, one, &first, "before", b"old-key")
+            .await?;
         let second = self.tenant_master(proxy, two).await?;
         // The stored key of tenant one rotates; its next acquisition loads new bytes.
-        self.state
-            .targets
-            .lock()
-            .map_err(|_| denied())?
-            .insert(one.backend_id(), Zeroizing::new("CD".repeat(32).into_bytes()));
+        self.state.targets.lock().map_err(|_| denied())?.insert(
+            one.backend_id(),
+            Zeroizing::new("CD".repeat(32).into_bytes()),
+        );
         let rotated = self
             .tenant_master_call(proxy, one, "tenant-one-rotated".into())
             .await?;
         self.encrypt(proxy, one, &rotated, "after", b"new-key")
             .await?;
         assert!(
-            self.encrypt(proxy, two, &second, "old", b"x").await.is_err(),
+            self.encrypt(proxy, two, &second, "old", b"x")
+                .await
+                .is_err(),
             "rotating a key must not free its old fingerprint for another registration"
         );
         Ok(())
