@@ -92,6 +92,18 @@ impl Tenant {
 
 /// The consumer callback accepts only a registered (consumer, registration) pair
 /// at a slot that registration owns.
+/// Stored master of each tenant backend. Mode 48 gives tenant two tenant one's
+/// key bytes, so two live registrations hold identical masters.
+pub(in super::super) fn tenant_targets(mode: u32) -> BTreeMap<String, Zeroizing<Vec<u8>>> {
+    let mut targets: BTreeMap<String, Zeroizing<Vec<u8>>> = TENANTS
+        .iter()
+        .map(|tenant| (tenant.backend_id(), tenant.key()))
+        .collect();
+    if mode == 48 {
+        targets.insert(TENANTS[1].backend_id(), TENANTS[0].key());
+    }
+    targets
+}
 pub(in super::super) fn registered_consumer(
     mode: u32,
     identity: &SecretCipherDeliveryIdentity2,
@@ -556,6 +568,55 @@ impl Control {
         self.encrypt(proxy, two, &second, "survivor", b"x").await?;
         Ok(())
     }
+    /// Mode 48: two live cipher registrations never share one master. The second
+    /// is refused while the first holds it, and retiring the first releases it.
+    async fn tenant_duplicate_master_is_refused(
+        &self,
+        proxy: &tinybus::Proxy,
+    ) -> tinybus::Result<()> {
+        self.register_tenants(proxy).await?;
+        let [one, two] = &TENANTS;
+        // Mode 48 stores tenant two's master under tenant one's key bytes.
+        let first = self.tenant_master(proxy, one).await?;
+        let second = self.tenant_master(proxy, two).await?;
+        let sealed = self.encrypt(proxy, one, &first, "seal", b"shared").await?;
+        assert!(
+            self.encrypt(proxy, two, &second, "dup", b"x").await.is_err(),
+            "a second live registration cannot seal under an identical master"
+        );
+        assert!(
+            self.decrypt(proxy, two, &second, "open", &sealed)
+                .await
+                .is_err(),
+            "a second live registration cannot open another registration's ciphertext"
+        );
+        let _: ApprovalScopeReceipt2 = proxy
+            .call(
+                names::methods::RETIRE_APPROVAL_SCOPE2,
+                (RetireApprovalScopeRequest2 {
+                    scope_id: one.scope_id(),
+                },),
+            )
+            .await?;
+        self.encrypt(proxy, two, &second, "after-release", b"two")
+            .await?;
+        // Removing the second releases its fingerprint too: the first registration
+        // registers again and seals under the same master.
+        let _: ApprovalScopeReceipt2 = proxy
+            .call(
+                names::methods::RETIRE_APPROVAL_SCOPE2,
+                (RetireApprovalScopeRequest2 {
+                    scope_id: two.scope_id(),
+                },),
+            )
+            .await?;
+        self.register_approval(proxy, one).await?;
+        assert!(self.register(proxy, &one.request()).await?.active);
+        let again = self.tenant_master(proxy, one).await?;
+        self.encrypt(proxy, one, &again, "reregistered", b"one")
+            .await?;
+        Ok(())
+    }
     /// Mode 46: replacing one tenant's approval scope drops only that scope's
     /// pending master requests, so the other tenant's request still resolves.
     async fn tenant_pending_survives_other_scope(
@@ -622,6 +683,7 @@ impl Control {
             44 => self.tenant_failed_delivery(proxy).await?,
             45 => self.tenant_runtime_lifecycle(proxy).await?,
             46 => self.tenant_pending_survives_other_scope(proxy).await?,
+            48 => self.tenant_duplicate_master_is_refused(proxy).await?,
             _ => return Err(denied()),
         }
         Ok(serde_json::json!({"tenants": true}))
@@ -699,6 +761,10 @@ async fn runtime_tenants_work_after_a_neutral_boot_and_retire_alone() -> TestRes
         45,
     )
     .await
+}
+#[tokio::test]
+async fn two_live_registrations_never_share_one_master() -> TestResult {
+    tenant_fixture("two_live_registrations_never_share_one_master", 48).await
 }
 #[tokio::test]
 async fn pending_master_requests_survive_another_tenants_scope_replacement() -> TestResult {

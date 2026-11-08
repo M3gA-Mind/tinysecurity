@@ -148,10 +148,7 @@ impl Backend {
             rows: Mutex::new(BTreeMap::new()),
             batches: Mutex::new(Vec::new()),
             targets: Mutex::new(if mode >= cipher_tests::TENANT_MODES {
-                cipher_tests::TENANTS
-                    .iter()
-                    .map(|tenant| (tenant.backend_id(), tenant.key()))
-                    .collect()
+                cipher_tests::tenant_targets(mode)
             } else if mode >= 20 || matches!(mode, 0 | 17) {
                 BTreeMap::from([("c".repeat(32), Zeroizing::new("AA".repeat(32).into_bytes()))])
             } else {
