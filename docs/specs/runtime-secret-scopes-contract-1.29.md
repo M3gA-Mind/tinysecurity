@@ -50,8 +50,8 @@ The module enforces tenant isolation itself:
 - Every `EvaluateSecretCipher2` and `ExecuteSecretCipher2` call selects its
   cipher by `request.registration_id`. A master handle works only with the
   registration that acquired it. Two live cipher registrations cannot both use
-  the same master for cipher work: the second is refused at its first cipher
-  request (see the fingerprint rule below). Acquiring the master alone is not
+  the same master for cipher work: the registration that requests cipher work
+  after the binding is refused, whatever the registration order (see the fingerprint rule below). Acquiring the master alone is not
   refused. The cipher does
   not bind ciphertext to a registration, so a registration that acquires a master
   after another registration's retirement can open ciphertext sealed under that
