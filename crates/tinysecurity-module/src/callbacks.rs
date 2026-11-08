@@ -225,8 +225,7 @@ impl AuditClient {
         // split its history across ledgers, and the init sink never sees it.
         if request.validate().is_err()
             || request.audit.generation != generation
-            || (request.subject == self.config.scope
-                && request.stream_id != self.config.stream_id)
+            || (request.subject == self.config.scope && request.stream_id != self.config.stream_id)
             || self.pins.pin(&request.subject, &request.stream_id).is_err()
         {
             return denied();

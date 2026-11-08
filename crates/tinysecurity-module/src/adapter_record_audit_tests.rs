@@ -230,7 +230,12 @@ async fn the_init_subject_never_records_on_an_alternate_stream()
     alternate.subject = init.scope.clone();
     let refused = service.record_audit2(alternate).await?;
     assert!(!refused.permitted && !refused.committed);
-    assert!(!rows.lock().map_err(|_| "fixture rows")?.contains_key(&"c".repeat(32)));
+    assert!(
+        !rows
+            .lock()
+            .map_err(|_| "fixture rows")?
+            .contains_key(&"c".repeat(32))
+    );
 
     let mut on_init = record("alpha", 'b', AuditKind2::PolicyDecision, 'd', 0);
     on_init.subject = init.scope.clone();
@@ -317,8 +322,15 @@ async fn an_approved_runtime_subject_cannot_record_on_a_second_stream()
         "a host record cannot move an approved subject to a second stream"
     );
     let own = init.record(on('b', 'e'), 1, redactor.clone()).await;
-    assert!(own.permitted && own.committed, "the approved stream still records");
-    assert!(!rows.lock().map_err(|_| "fixture rows")?.contains_key(&"d".repeat(32)));
+    assert!(
+        own.permitted && own.committed,
+        "the approved stream still records"
+    );
+    assert!(
+        !rows
+            .lock()
+            .map_err(|_| "fixture rows")?
+            .contains_key(&"d".repeat(32))
+    );
     Ok(())
 }
-

@@ -2074,8 +2074,8 @@ fn configured_approvals(
                 }
                 let audit_config = audit_config
                     .ok_or_else(|| tinybus::Error::failed("approval audit unavailable"))?;
-                let audit_pins =
-                    audit_pins.ok_or_else(|| tinybus::Error::failed("approval audit unavailable"))?;
+                let audit_pins = audit_pins
+                    .ok_or_else(|| tinybus::Error::failed("approval audit unavailable"))?;
                 let ports = crate::approval_callbacks::ApprovalClients::new(
                     connection,
                     requested_host,
