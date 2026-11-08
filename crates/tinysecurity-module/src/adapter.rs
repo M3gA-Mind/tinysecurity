@@ -2034,6 +2034,7 @@ fn configured_approvals(
     requested_host: Option<&str>,
     approval_config: Option<tinysecurity_bus::ApprovalConfig2>,
     audit_config: Option<&tinysecurity_bus::AuditConfig2>,
+    audit_pins: Option<Arc<crate::stream_pins::StreamPins>>,
     candidate: &Policy,
     current: Option<
         &Option<(
@@ -2073,13 +2074,16 @@ fn configured_approvals(
                 }
                 let audit_config = audit_config
                     .ok_or_else(|| tinybus::Error::failed("approval audit unavailable"))?;
+                let audit_pins =
+                    audit_pins.ok_or_else(|| tinybus::Error::failed("approval audit unavailable"))?;
                 let ports = crate::approval_callbacks::ApprovalClients::new(
                     connection,
                     requested_host,
                     &config,
                     audit_config,
                     &candidate.redactor(),
-                )?;
+                )?
+                .with_pins(audit_pins);
                 let engine = tinysecurity::approval::Engine::new(
                     config.clone(),
                     Arc::new(ports),
@@ -2385,6 +2389,7 @@ async fn setup(connection: Connection, mut config: ModuleConfig) -> BusResult<()
         requested_host.as_deref(),
         approval_config.clone(),
         audit_config.as_ref(),
+        audit.as_ref().map(|client| client.pins()),
         &candidate,
         APPROVALS.get(),
     )?;
