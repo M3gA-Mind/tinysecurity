@@ -352,11 +352,7 @@ impl Ports for ApprovalClients {
     async fn audit(&self, row: ApprovalRow2) -> Result<()> {
         self.append_row(row, false).await.map(|_| ())
     }
-    pub(crate) async fn admit_scope(
-        &self,
-        scope: &ApprovalScope2,
-        audit_stream_id: &str,
-    ) -> Result<()> {
+    async fn admit_scope(&self, scope: &ApprovalScope2, audit_stream_id: &str) -> Result<()> {
         let handle = tinysecurity::approval::scope_handle(&scope.subject)?;
         self.pins.pin(&scope.subject, audit_stream_id)?;
         let client = Arc::new(self.runtime_client(scope, audit_stream_id)?);

@@ -242,13 +242,14 @@ async fn the_init_subject_never_records_on_an_alternate_stream()
 #[tokio::test]
 async fn an_approved_runtime_subject_cannot_record_on_a_second_stream()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use tinysecurity::approval::Ports;
     use tinysecurity_bus::{AccessTier, ApprovalConfig2, ApprovalScope2};
     let bus = MemoryBus::new();
     let broker = Broker::new().spawn(bus.clone());
     let host = Connection::connect(bus.connect().await?).await?;
     let module = Connection::connect(bus.connect().await?).await?;
     let peer = host.unique_name().ok_or("host peer")?;
-    let binding = PeerBinding::new(Some(peer.as_str()))?;
+    let binding = crate::callbacks::PeerBinding::new(Some(peer.as_str()))?;
     let rows: Rows = Arc::default();
     let policy = Arc::new(RwLock::new(Policy::new(ModuleConfig::default())?));
     host.serve_at(
