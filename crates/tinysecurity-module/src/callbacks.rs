@@ -179,10 +179,14 @@ impl AuditClient {
             config,
             redactor: std::sync::RwLock::new(redactor),
             native,
-            pins: crate::stream_pins::StreamPins::default(),
+            pins: std::sync::Arc::new(crate::stream_pins::StreamPins::default()),
             #[cfg(test)]
             test_ordinary_calls: false,
         })
+    }
+    /// The stream pin table of this client's subjects, shared with approval admission.
+    pub(crate) fn pins(&self) -> std::sync::Arc<crate::stream_pins::StreamPins> {
+        std::sync::Arc::clone(&self.pins)
     }
     /// Use ordinary mock-bus callbacks in unit tests without confidential module
     /// provenance. Production clients always use confidential callback calls.
