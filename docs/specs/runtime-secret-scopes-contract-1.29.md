@@ -78,7 +78,9 @@ The module enforces tenant isolation itself:
   live registration whose fingerprint is already bound is refused, with the typed
   message `secret master already bound to another live registration`, before any
   ciphertext is produced or opened under that master. Retiring a registration
-  releases its fingerprint, so the master may be registered again. The master is
+  releases the fingerprint of every master it used, so those masters may be registered
+  again. A registration keeps the fingerprints of earlier masters after a key rotation,
+  because their handles stay valid until retirement. The master is
   never stored, returned or logged. Master bytes are only loaded on acquisition,
   so the check runs at the first cipher request rather than at registration. The
   check covers cipher-owning registrations; a registration without a cipher can
