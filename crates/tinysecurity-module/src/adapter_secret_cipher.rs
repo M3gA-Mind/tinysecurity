@@ -9,6 +9,7 @@
 use super::{PolicyService, secret::SecretState};
 use crate::callbacks::AuditClient;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use tinysecurity::crypto::native_handles::{
     self as handles,
@@ -125,6 +126,8 @@ struct Context {
     slot: u16,
     delivery_audit: AuditCorrelation2,
     staged: Mutex<Option<SecretCipherDeliveryIdentity2>>,
+    /// Set just before the consumer is called: from then on the slot is fenced.
+    attempted: AtomicBool,
 }
 struct Broker {
     connection: tinybus::Connection,
@@ -233,6 +236,23 @@ struct Lease {
     context: Arc<Context>,
     succeeded: bool,
 }
+impl Lease {
+    /// Free the slot of a request refused before any delivery was attempted. The
+    /// consumer never saw it, so nothing about it is uncertain.
+    fn release_unattempted(&self) {
+        if self.context.attempted.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut slots) = self.broker.slots.lock()
+            && slots
+                .get(usize::from(self.context.slot))
+                .and_then(Option::as_ref)
+                == Some(&self.context.operation)
+        {
+            slots[usize::from(self.context.slot)] = None;
+        }
+    }
+}
 impl Drop for Lease {
     fn drop(&mut self) {
         if let Ok(mut contexts) = self.broker.contexts.lock() {
@@ -302,6 +322,7 @@ impl NativeCipherConsumer for Broker {
                 .with_timeout(std::time::Duration::from_millis(u64::from(
                     self.config.timeout_ms,
                 )));
+            context.attempted.store(true, Ordering::SeqCst);
             let response = proxy
                 .call_confidential::<SecretCipherDeliveryResponse2>(
                     callback_names2::DELIVER,
@@ -578,6 +599,10 @@ pub(super) fn register(
     active.insert(request.registration_id.into(), state);
     Ok(())
 }
+/// Whether any runtime cipher is live, so a neutral boot still reports the authority.
+pub(super) fn runtime_active() -> bool {
+    runtime().lock().is_ok_and(|active| !active.is_empty())
+}
 /// Whether a repeated registration asks for exactly the cipher it already has.
 pub(super) fn matches_runtime(
     registration: &str,
@@ -763,6 +788,7 @@ impl PolicyService {
             slot: 0,
             delivery_audit: request.delivery_audit.clone(),
             staged: Mutex::new(None),
+            attempted: AtomicBool::new(false),
         })?;
         let execution = state
             .broker
@@ -773,11 +799,15 @@ impl PolicyService {
             .validate_pending(&pending.work)
             .map_err(|_| denied())?;
         execution?.verify(&operation, "execution", generation)?;
-        let completed = state
-            .owner
-            .execute_guarded(pending.work)
-            .await
-            .map_err(|_| denied())?;
+        let completed = match state.owner.execute_guarded(pending.work).await {
+            Ok(completed) => completed,
+            Err(_) => {
+                // Refused before delivery (for example, ciphertext that does not
+                // authenticate): the slot is free again. Refused after delivery stays fenced.
+                lease.release_unattempted();
+                return Err(denied());
+            }
+        };
         completed.validate().map_err(|_| denied())?;
         let staged = lease.context.staged.lock().map_err(|_| denied())?.clone();
         if staged.is_none() {

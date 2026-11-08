@@ -1639,7 +1639,7 @@ impl PolicyService {
         info.callbacks.approvals = self.approvals.is_some();
         info.callbacks.sandbox = self.sandbox.is_some();
         info.callbacks.secret = self.secret.is_some();
-        info.callbacks.secret_cipher = self.secret_cipher.is_some();
+        info.callbacks.secret_cipher = self.secret_cipher.is_some() || cipher::runtime_active();
         info.callbacks.device = self.device.is_some();
         info.callbacks.crypto = self.crypto.is_some();
         info.scoped_policies = self
