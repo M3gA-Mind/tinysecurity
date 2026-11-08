@@ -266,7 +266,9 @@ async fn an_approved_runtime_subject_cannot_record_on_a_second_stream()
         broker,
     };
     let config = permission_audit_config(true);
-    let redactor = tinysecurity::Redactor::new(&RedactorConfig::default())?;
+    let redactor = tinysecurity::Redactor::new(&RedactorConfig {
+        secrets: vec![Secret("private-secret".into())],
+    })?;
     let init = crate::callbacks::AuditClient::new_for_test(
         module.clone(),
         binding,
