@@ -289,6 +289,7 @@ impl AuditClient {
             if stream_id != self.config.stream_id {
                 return Err(refused());
             }
+            // Same rule as `record`: the init subject never leaves the init stream.
             let mut client = self.subject_client(subject, stream_id, self.registry()?)?;
             client
                 .config
