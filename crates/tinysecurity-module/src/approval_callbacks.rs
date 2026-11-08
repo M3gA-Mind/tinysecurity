@@ -1,6 +1,6 @@
 //! Bounded exact approval callback clients, fixed to the trusted unique init peer.
 use crate::callbacks::{AuditClient, PeerBinding};
-use crate::stream_pins::StreamPins;
+use crate::stream_pins::{Owner, StreamPins};
 use std::sync::{Arc, RwLock};
 use tinysecurity::approval::{Error, NativeAuditAcknowledgement, Ports, Result};
 use tinysecurity_bus::{
@@ -354,7 +354,8 @@ impl Ports for ApprovalClients {
     }
     async fn admit_scope(&self, scope: &ApprovalScope2, audit_stream_id: &str) -> Result<()> {
         let handle = tinysecurity::approval::scope_handle(&scope.subject)?;
-        self.pins.pin(&scope.subject, audit_stream_id)?;
+        self.pins
+            .pin_for(&scope.subject, audit_stream_id, Owner::Approval)?;
         let client = Arc::new(self.runtime_client(scope, audit_stream_id)?);
         self.store.admit(handle.clone())?;
         // The engine serializes lifecycles, so an existing client is stale (for
@@ -370,7 +371,7 @@ impl Ports for ApprovalClients {
             .write()
             .map_err(|_| Error::Unavailable)?
             .retain(|(s, _)| s != &handle);
-        self.pins.unpin(&scope.subject)?;
+        self.pins.unpin_for(&scope.subject, Owner::Approval)?;
         self.store.release(&handle)
     }
     async fn native_audit(&self, row: ApprovalRow2) -> Result<NativeAuditAcknowledgement> {

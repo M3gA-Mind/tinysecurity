@@ -226,7 +226,9 @@ impl AuditClient {
         if request.validate().is_err()
             || request.audit.generation != generation
             || (request.subject == self.config.scope && request.stream_id != self.config.stream_id)
-            || self.pins.pin(&request.subject, &request.stream_id).is_err()
+            || self.pins
+                .pin_for(&request.subject, &request.stream_id, crate::stream_pins::Owner::Recorded)
+                .is_err()
         {
             return denied();
         }
@@ -309,7 +311,9 @@ impl AuditClient {
             }
             return Ok(client);
         }
-        self.pins.pin(subject, stream_id).map_err(|_| refused())?;
+        self.pins
+            .pin_for(subject, stream_id, crate::stream_pins::Owner::Recorded)
+            .map_err(|_| refused())?;
         self.subject_client(subject, stream_id, self.registry()?)
     }
     pub(crate) fn registry(&self) -> Result<tinysecurity::Redactor> {

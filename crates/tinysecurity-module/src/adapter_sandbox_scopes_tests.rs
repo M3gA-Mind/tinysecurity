@@ -59,6 +59,7 @@ fn runtime_with_timeout(
             journal_max_events: 10_000,
         },
         tinysecurity::Redactor::new(&RedactorConfig::default())?,
+        std::sync::Arc::default(),
     ))
 }
 fn rows(h: &Harness) -> Vec<AuditSinkRequest2> {
@@ -417,13 +418,13 @@ async fn attaching_a_sandbox_enables_runtime_scopes_only_with_an_audit() -> Test
     };
     h.service.sandbox_runtime = None;
     h.service
-        .attach_sandbox(Some(&engine), None, (&h.module, &binding))?;
+        .attach_sandbox(Some(&engine), None, (&h.module, &binding), None)?;
     assert!(h.service.sandbox.is_some() && h.service.sandbox_runtime.is_none());
     h.service
-        .attach_sandbox(Some(&engine), Some(audit.clone()), (&h.module, &binding))?;
+        .attach_sandbox(Some(&engine), Some(audit.clone()), (&h.module, &binding), None)?;
     assert!(h.service.sandbox_runtime.is_some());
     h.service
-        .attach_sandbox(None, Some(audit), (&h.module, &binding))?;
+        .attach_sandbox(None, Some(audit), (&h.module, &binding), None)?;
     assert!(h.service.sandbox.is_none() && h.service.sandbox_runtime.is_none());
     Ok(())
 }

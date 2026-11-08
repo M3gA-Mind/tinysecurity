@@ -19,8 +19,9 @@ pub(super) struct SandboxRuntime {
     redactor: tinysecurity::Redactor,
     /// One client per runtime scope identity.
     clients: RwLock<BTreeMap<String, Arc<AuditClient>>>,
-    /// Stream of each subject while live and for a retention window after release.
-    pub(super) pins: StreamPins,
+    /// Stream of each subject, shared with approval and host-recorded audit so a
+    /// subject has one ledger; each path holds its own pin (see `Owner`).
+    pub(super) pins: std::sync::Arc<StreamPins>,
     /// Registration and retirement are serialized so a failed step is ours to undo.
     lifecycle: tokio::sync::Mutex<()>,
 }
@@ -30,6 +31,7 @@ impl SandboxRuntime {
         binding: PeerBinding,
         base: AuditConfig2,
         redactor: tinysecurity::Redactor,
+        pins: std::sync::Arc<StreamPins>,
     ) -> Self {
         Self {
             connection,
@@ -37,7 +39,7 @@ impl SandboxRuntime {
             base,
             redactor,
             clients: RwLock::new(BTreeMap::new()),
-            pins: StreamPins::default(),
+            pins,
             lifecycle: tokio::sync::Mutex::new(()),
         }
     }
@@ -109,6 +111,7 @@ impl PolicyService {
         engine: Option<&Arc<Engine>>,
         audit: Option<AuditConfig2>,
         peer: (&tinybus::Connection, &PeerBinding),
+        pins: Option<std::sync::Arc<StreamPins>>,
     ) -> BusResult<()> {
         self.sandbox = engine.cloned();
         self.sandbox_runtime = match (engine, audit) {
@@ -119,6 +122,7 @@ impl PolicyService {
                     peer.1.clone(),
                     base,
                     redactor,
+                    pins.unwrap_or_default(),
                 )))
             }
             _ => None,
@@ -210,11 +214,11 @@ impl PolicyService {
         }
         runtime
             .pins
-            .pin(&subject, &request.audit_stream_id)
+            .pin_for(&subject, &request.audit_stream_id, Owner::Sandbox)
             .map_err(|_| refused("conflicting sandbox audit stream"))?;
         let rollback = |clients: &BTreeMap<String, Arc<AuditClient>>| {
             if !SandboxRuntime::holds_subject(clients, &subject) {
-                let _ = runtime.pins.unpin(&subject);
+                let _ = runtime.pins.unpin_for(&subject, Owner::Sandbox);
             }
         };
         let client = match runtime.build_client(&subject, &request.audit_stream_id) {
@@ -258,7 +262,7 @@ impl PolicyService {
             .map_err(|_| refused("sandbox scope cannot be retired"))?;
         clients.remove(&request.scope_id);
         if !SandboxRuntime::holds_subject(&clients, &subject) {
-            let _ = runtime.pins.unpin(&subject);
+            let _ = runtime.pins.unpin_for(&subject, Owner::Sandbox);
         }
         drop(clients);
         let live = engine
