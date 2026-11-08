@@ -487,6 +487,7 @@ async fn approval_initialization_requires_verified_audit_and_retains_immutable_r
             requested_host,
             approval,
             audit,
+            Some(Arc::default()),
             &candidate,
             current,
         )
@@ -819,6 +820,7 @@ async fn explicit_judge_initialization_activates_the_native_engine()
         Some(peer.as_str()),
         Some(config),
         Some(&audit),
+        Some(Arc::default()),
         &candidate,
         None,
     )?;
