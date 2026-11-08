@@ -221,3 +221,22 @@ async fn recording_needs_a_configured_audit_client()
     );
     Ok(())
 }
+#[tokio::test]
+async fn the_init_subject_never_records_on_an_alternate_stream()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (service, rows, _host) = recording_service(true, true).await?;
+    let init = permission_audit_config(true);
+    let mut alternate = record("alpha", 'b', AuditKind2::PolicyDecision, 'c', 0);
+    alternate.subject = init.scope.clone();
+    let refused = service.record_audit2(alternate).await?;
+    assert!(!refused.permitted && !refused.committed);
+    assert!(!rows.lock().map_err(|_| "fixture rows")?.contains_key(&"c".repeat(32)));
+
+    let mut on_init = record("alpha", 'b', AuditKind2::PolicyDecision, 'd', 0);
+    on_init.subject = init.scope.clone();
+    on_init.stream_id = init.stream_id.clone();
+    let accepted = service.record_audit2(on_init).await?;
+    assert!(accepted.permitted && accepted.committed);
+    Ok(())
+}
+

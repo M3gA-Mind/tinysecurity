@@ -351,12 +351,28 @@ impl Control {
             cipher.slots = 0;
         }
         assert!(self.register(proxy, &invalid).await.is_err());
+        // Only a ConfigUserMaster registration owns a cipher. The refusal comes before
+        // native registration, so the same id still registers cleanly afterwards.
+        let mut app = PROBE.request();
+        app.registration.purpose = MasterPurpose2::AppEncryptionMaster;
+        app.registration.target.slot = MasterSlotKind2::App;
+        assert!(
+            self.register(proxy, &app).await.is_err(),
+            "an app master owns no cipher"
+        );
         let secret = self.service.secret.as_ref().ok_or_else(denied)?;
         assert!(
             secret.registration_id(&PROBE.registration_id()).is_err(),
             "refusals register nothing"
         );
         assert!(self.register(proxy, &PROBE.request()).await?.active);
+        let info: tinysecurity_bus::PolicyInfo = proxy
+            .call(names::methods::POLICY_INFO, serde_json::json!([]))
+            .await?;
+        assert!(
+            info.callbacks.secret_cipher,
+            "a runtime cipher is reported after a neutral boot"
+        );
         Ok(())
     }
     /// Mode 41: one tenant's ciphertext never opens under another tenant's master.
@@ -378,6 +394,15 @@ impl Control {
             self.decrypt(proxy, one, &first, "open", &ciphertext)
                 .await?,
             b"tenant-one-secret"
+        );
+        // The refused decrypt never reached tenant two's consumer, so its only
+        // slot is free again and tenant two still round-trips its own secret.
+        let own = self
+            .encrypt(proxy, two, &second, "own-seal", b"tenant-two-secret")
+            .await?;
+        assert_eq!(
+            self.decrypt(proxy, two, &second, "own-open", &own).await?,
+            b"tenant-two-secret"
         );
         Ok(())
     }
@@ -531,6 +556,92 @@ impl Control {
         self.encrypt(proxy, two, &second, "survivor", b"x").await?;
         Ok(())
     }
+    /// Mode 46: replacing one tenant's approval scope drops only that scope's
+    /// pending master requests, so the other tenant's request still resolves.
+    async fn tenant_pending_survives_other_scope(
+        &self,
+        proxy: &tinybus::Proxy,
+    ) -> tinybus::Result<()> {
+        self.register_tenants(proxy).await?;
+        let [one, two] = &TENANTS;
+        let request = SecretRequest2 {
+            registration_id: one.registration_id(),
+            call_id: "tenant-one-pending".into(),
+            ttl_ms: 30000,
+            operation: SecretOperation2::ResolveConfigMaster,
+        };
+        let row: ApprovalRow2 = proxy
+            .call_confidential(
+                names::methods::EVALUATE_SECRET2,
+                (EvaluateSecretRequest2 {
+                    request: request.clone(),
+                    audit: self.next_audit(),
+                },),
+            )
+            .await?;
+        assert_eq!(row.state, ApprovalLifecycle2::Pending);
+        let mut replacement = two.approval();
+        replacement.scope.policy_ref = "tenant-two-replaced".into();
+        let _: ApprovalScopeReceipt2 = proxy
+            .call(names::methods::REPLACE_APPROVAL_SCOPE2, (&replacement,))
+            .await?;
+        let approved: ApprovalRow2 = proxy
+            .call(
+                names::methods::DECIDE2,
+                (DecideRequest2 {
+                    scope_id: one.scope_id(),
+                    request_id: row.request_id.clone(),
+                    decision_ticket: "actual-fixture-human-ticket".into(),
+                    audit: self.next_audit(),
+                },),
+            )
+            .await?;
+        assert_eq!(approved.choice, Some(ApprovalChoice2::Once));
+        let response: SecretResponse2 = proxy
+            .call_confidential(
+                names::methods::EXECUTE_SECRET2,
+                (&ExecuteSecretRequest2 {
+                    request,
+                    request_id: row.request_id,
+                    audit: self.next_audit(),
+                },),
+            )
+            .await?;
+        let SecretResponse2::MasterHandle { .. } = response;
+        Ok(())
+    }
+    /// Mode 47: a host record cannot move a runtime subject onto a second stream.
+    async fn tenant_record_stays_on_its_stream(
+        &self,
+        proxy: &tinybus::Proxy,
+    ) -> tinybus::Result<()> {
+        self.register_tenants(proxy).await?;
+        let [one, _] = &TENANTS;
+        let info: tinysecurity_bus::PolicyInfo = proxy
+            .call(names::methods::POLICY_INFO, serde_json::json!([]))
+            .await?;
+        let other = AuditRecordRequest2 {
+            subject: one.subject(),
+            stream_id: "3f".repeat(16),
+            kind: AuditKind2::PolicyDecision,
+            attribution: "tool:host".into(),
+            arguments_json: "{}".into(),
+            rule_ids: vec![],
+            audit: AuditCorrelation2 {
+                event_id: "a".repeat(32),
+                expected_tail: 0,
+                generation: info.generation,
+            },
+        };
+        let response: AuditResponse2 = proxy
+            .call(names::methods::RECORD_AUDIT2, (&other,))
+            .await?;
+        assert!(
+            !response.permitted && !response.committed,
+            "a host record cannot move a runtime subject to another stream"
+        );
+        Ok(())
+    }
     pub(in super::super) async fn exercise_tenants(
         &self,
         proxy: &tinybus::Proxy,
@@ -542,6 +653,8 @@ impl Control {
             43 => self.tenant_audit_subjects(proxy).await?,
             44 => self.tenant_failed_delivery(proxy).await?,
             45 => self.tenant_runtime_lifecycle(proxy).await?,
+            46 => self.tenant_pending_survives_other_scope(proxy).await?,
+            47 => self.tenant_record_stays_on_its_stream(proxy).await?,
             _ => return Err(denied()),
         }
         Ok(serde_json::json!({"tenants": true}))
@@ -617,6 +730,22 @@ async fn runtime_tenants_work_after_a_neutral_boot_and_retire_alone() -> TestRes
     tenant_fixture(
         "runtime_tenants_work_after_a_neutral_boot_and_retire_alone",
         45,
+    )
+    .await
+}
+#[tokio::test]
+async fn pending_master_requests_survive_another_tenants_scope_replacement() -> TestResult {
+    tenant_fixture(
+        "pending_master_requests_survive_another_tenants_scope_replacement",
+        46,
+    )
+    .await
+}
+#[tokio::test]
+async fn a_host_record_cannot_move_a_runtime_subject_to_another_stream() -> TestResult {
+    tenant_fixture(
+        "a_host_record_cannot_move_a_runtime_subject_to_another_stream",
+        47,
     )
     .await
 }
