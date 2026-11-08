@@ -469,6 +469,12 @@ impl SecretState {
     ) -> tinybus::Result<(SecretScopeReceipt2, bool)> {
         let cipher = request.cipher;
         let descriptor = request.registration;
+        // Only a ConfigUserMaster registration can own a cipher. Refuse before any
+        // native registration: a later cipher build failure would roll that
+        // registration back and tombstone its id for every retry.
+        if cipher.is_some() && descriptor.purpose != MasterPurpose2::ConfigUserMaster {
+            return Err(denied());
+        }
         let scope = engine
             .scope_snapshot(&descriptor.approval_scope_id)
             .map_err(approval_failure)?;
