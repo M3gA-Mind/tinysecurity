@@ -18,6 +18,7 @@ docs/
 - **[`specs/`](specs/README.md)** — one file per feature, module, or subsystem,
   describing its behavior, public surface, invariants, and acceptance criteria.
 - **[`module-crypto.md`](module-crypto.md)** — confidential device, master, cipher, password, keyring and pairing members of the TinySecurity module contract.
+- **[`module-approval-contracts.md`](module-approval-contracts.md)** — runtime approval scopes, host tools and approval origin classes, moved out of `MODULE.md` to keep it under 500 lines.
 - **[`module-subject-policies.md`](module-subject-policies.md)** — registered subject policy members and their generation-bound authorization rules.
 - **[`specs/device-pairing-contract-1.25.md`](specs/device-pairing-contract-1.25.md)** — host-attested paired-device lifecycle contract and trust boundaries.
 - **[`specs/local-provider-endpoint-1.32.md`](specs/local-provider-endpoint-1.32.md)** — same-machine-only provider locality for `LocalOnly` privacy checks.
