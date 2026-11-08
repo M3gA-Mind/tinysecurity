@@ -69,6 +69,18 @@ The module enforces tenant isolation itself:
   `RecordAudit2` uses, so a subject never writes to two ledgers. Those pins are
   kept after retirement, so a retired subject cannot come back on a different
   stream in the same process.
+- Two live cipher registrations never share one master. At each cipher request
+  the module computes a keyed, non-secret fingerprint of the registration's
+  master (HMAC-SHA256 keyed by the master over the label
+  `tinysecurity/master-fingerprint/v1`) and binds it to the registration. A second
+  live registration whose fingerprint is already bound is refused, with the typed
+  message `secret master already bound to another live registration`, before any
+  ciphertext is produced or opened under that master. Retiring a registration
+  releases its fingerprint, so the master may be registered again. The master is
+  never stored, returned or logged. Master bytes are only loaded on acquisition,
+  so the check runs at the first cipher request rather than at registration. The
+  check covers cipher-owning registrations; a registration without a cipher can
+  never decrypt through the cipher path.
 - A `HumanOnce` master grant still needs an authenticated human decision. A
   cipher adds routine operations over an acquired master; it never acquires one.
 

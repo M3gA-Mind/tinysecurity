@@ -148,7 +148,9 @@ against its registration before removal, and a consumer is bound to one
 registration for the life of the process. The process-wide work budgets
 (`max_in_flight`, `max_pending_bytes`, `max_handles`) are still shared, and
 per-registration budgets are a follow-up. A registration whose store readback
-was uncertain stays dead by design.
+was uncertain stays dead by design. Two live cipher registrations never share one
+master: the second is refused at its first cipher request, and retirement releases
+the master.
 Full details: [registration-owned ciphers](docs/specs/runtime-secret-scopes-contract-1.29.md#registration-owned-ciphers-contract-21).
 
 ## Confidential injected master resolution
