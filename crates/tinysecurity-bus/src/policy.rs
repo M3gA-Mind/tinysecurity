@@ -392,8 +392,11 @@ pub struct JudgeThresholdRule {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeConfig {
-    /// Init-only resolved backend credential.
-    pub credential: Secret,
+    /// Init-only resolved backend credential. Absent, the module asks the
+    /// trusted host through `JudgeCredentialHost2` when a judgement first
+    /// needs it, never during load, and reuses it for five minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<Secret>,
     /// Exact evaluation endpoint; never exposed in diagnostic output.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub endpoint: String,
@@ -424,6 +427,30 @@ pub struct JudgeConfig {
     /// Score lifetime; zero disables caching.
     #[serde(default, skip_serializing_if = "zero")]
     pub cache_ttl_ms: u32,
+}
+/// Why the module asks the host for the judge credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JudgeCredentialReason2 {
+    /// No credential is held, or the held one is older than five minutes.
+    Initial,
+    /// The judge endpoint rejected the last credential the host gave.
+    Rejected,
+}
+/// `JudgeCredentialHost2.Credential` callback request; carries no secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeCredentialRequest2 {
+    /// Why the credential is needed now.
+    pub reason: JudgeCredentialReason2,
+}
+/// `JudgeCredentialHost2.Credential` reply over confidential transport.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeCredentialResponse2 {
+    /// Current credential, 4..=4096 bytes; absent sends the judgement to a person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<Secret>,
 }
 impl fmt::Debug for JudgeConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

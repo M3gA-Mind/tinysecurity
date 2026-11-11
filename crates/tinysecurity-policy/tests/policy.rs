@@ -290,7 +290,7 @@ fn invalid_judge_and_policy_configuration_do_not_activate()
     let mut policy = Policy::new(ModuleConfig::default())?;
     let old = policy.info();
     let judge = JudgeConfig {
-        credential: Secret("fixture-secret".into()),
+        credential: Some(Secret("fixture-secret".into())),
         endpoint: "http://not-loopback.invalid/judge".into(),
         provider: JudgeProvider::TypeSafe,
         exfiltrate_millis: 100,

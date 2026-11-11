@@ -13,9 +13,11 @@
 mod budget;
 mod cache;
 mod error;
+mod host;
 mod judge;
 pub mod rules;
 pub use error::{Error, Result};
+pub use host::{CredentialSource, HOST_CREDENTIAL_TTL_MS};
 pub use judge::{Engine, Input, JudgeClient, SdkClient};
 /// Injected monotonic time for shared budgets and exact-score cache expiration.
 pub trait Clock: Send + Sync + std::fmt::Debug {

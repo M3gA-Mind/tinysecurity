@@ -411,7 +411,10 @@ fn validate(config: &ModuleConfig) -> Result<()> {
 fn registry(config: &ModuleConfig) -> Result<tinysecurity_redact::Redactor> {
     let mut registry = config.redactor.clone();
     if let Some(judge) = &config.judge {
-        for secret in [&judge.credential, &crate::Secret(judge.endpoint.clone())] {
+        // A credential the host supplies after load is never in module text paths,
+        // so only a configured one is registered here.
+        let endpoint = crate::Secret(judge.endpoint.clone());
+        for secret in judge.credential.iter().chain([&endpoint]) {
             if !registry.secrets.contains(secret) {
                 registry.secrets.push(secret.clone());
             }

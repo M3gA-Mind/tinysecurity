@@ -788,7 +788,7 @@ fn settings() -> (ApprovalConfig2, AuditConfig2) {
 
 fn judge_settings() -> JudgeConfig {
     JudgeConfig {
-        credential: Secret("fake-judge-key".into()),
+        credential: Some(Secret("fake-judge-key".into())),
         endpoint: "http://127.0.0.1:1/jev".into(),
         provider: JudgeProvider::TypeSafe,
         threshold_millis: 900,
@@ -825,21 +825,34 @@ async fn explicit_judge_initialization_activates_the_native_engine()
         None,
     )?;
     let (_, approvals) = approvals.as_ref().ok_or("approvals")?;
-    let engine = configured_automatic(Some(judge.clone()), Some(approvals))?;
+    // Without a configured credential only the trusted host may supply one.
+    let mut hosted = judge.clone();
+    hosted.credential = None;
+    assert!(
+        configured_automatic(Some(hosted.clone()), Some(approvals), &connection, None).is_err()
+    );
+    let lazy = configured_automatic(
+        Some(hosted),
+        Some(approvals),
+        &connection,
+        Some(peer.as_str()),
+    )?;
+    assert!(lazy.is_some());
+    let engine = configured_automatic(Some(judge.clone()), Some(approvals), &connection, None)?;
     assert!(engine.is_some());
     approvals.replace_automatic(engine)?;
     let mut invalid = judge.clone();
     invalid.endpoint = "http://not-loopback.invalid/jev".into();
-    assert!(configured_automatic(Some(invalid), Some(approvals)).is_err());
+    assert!(configured_automatic(Some(invalid), Some(approvals), &connection, None).is_err());
     assert!(approvals.automatic()?.is_some());
     approvals.replace_automatic(None)?;
     assert!(approvals.automatic()?.is_none());
     assert!(approvals.previous_automatic()?.is_some());
-    let restored = configured_automatic(Some(judge.clone()), Some(approvals))?;
+    let restored = configured_automatic(Some(judge.clone()), Some(approvals), &connection, None)?;
     assert!(restored.is_some());
     approvals.replace_automatic(restored)?;
-    assert!(configured_automatic(Some(judge), None).is_err());
-    assert!(configured_automatic(None, None)?.is_none());
+    assert!(configured_automatic(Some(judge.clone()), None, &connection, None).is_err());
+    assert!(configured_automatic(None, None, &connection, None)?.is_none());
     assert!(!serde_json::to_string(&candidate.info())?.contains("fake-judge-key"));
     let redacted = candidate.redactor().redact(&RedactRequest {
         text: "fake-judge-key http://127.0.0.1:1/jev".into(),

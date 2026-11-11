@@ -19,6 +19,16 @@ lookup or per-call credential is supported. Invalid init/reinit rejects without
 changing the active policy. The credential and init endpoint are registered as
 redaction literals. Configuration, clients and prepared inputs have redacted Debug.
 
+A host that can only read the credential through the admitted module (from its
+keyring) leaves `credential` out. The module then asks the init-bound trusted host
+through the confidential `JudgeCredentialHost2.Credential` callback on the first
+judgement, never during load, within the judge's `timeout_ms`. It reuses the client
+for five minutes (`HOST_CREDENTIAL_TTL_MS`). An endpoint rejection (401/403) drops
+it at once, and the next ask says `rejected`. A reinit drops it too. No credential,
+or a failed ask, sends that request to a person, the same as an unavailable judge.
+A credential supplied this way arrives after init, so it is not registered as a
+redaction literal; it is used only in the outbound request header.
+
 `threshold_millis` is the default inclusive minimum for both intent and
 reversibility. `exfiltrate_millis` is the inclusive maximum for exfiltration.
 `thresholds` can override these three bounds by origin and verified local/external

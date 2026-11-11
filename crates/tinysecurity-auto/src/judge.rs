@@ -1,5 +1,10 @@
 //! Redaction-first Jev requests, exact score binding and total deadlines.
-use crate::{Clock, Error, Result, budget::Budget, cache::Cache};
+use crate::{
+    Clock, Error, Result,
+    budget::Budget,
+    cache::Cache,
+    host::{self, CredentialSource, HostClient},
+};
 use sha2::{Digest, Sha256};
 use std::{
     sync::{Arc, Mutex},
@@ -10,7 +15,7 @@ use tinyinference_decisions::{
 };
 use tinysecurity_bus::{
     ApprovalBinding2, JudgeConfig, JudgeEvidence2, JudgeOutcome2, JudgeProvider, JudgeThresholds,
-    RedactMode, RedactRequest,
+    RedactMode, RedactRequest, Secret,
 };
 use tinysecurity_redact::Redactor;
 const QUESTIONS: [&str; 3] = ["intent", "reversible", "exfiltrate"];
@@ -55,10 +60,16 @@ impl SdkClient {
     /// # Errors
     /// Rejects invalid credentials, endpoints or timeout settings.
     pub fn new(config: &JudgeConfig) -> Result<Self> {
+        Self::with_credential(config, config.credential.as_ref().ok_or(Error::Invalid)?)
+    }
+    /// The same client for a credential the host supplied after load.
+    /// # Errors
+    /// Rejects invalid credentials, endpoints or timeout settings.
+    pub fn with_credential(config: &JudgeConfig, credential: &Secret) -> Result<Self> {
         let mut client = match config.provider {
-            JudgeProvider::TypeSafe => ClientConfig::new(config.credential.0.clone()),
-            JudgeProvider::OpenRouter => ClientConfig::openrouter(config.credential.0.clone()),
-            JudgeProvider::OpenJev => ClientConfig::openjev(config.credential.0.clone()),
+            JudgeProvider::TypeSafe => ClientConfig::new(credential.0.clone()),
+            JudgeProvider::OpenRouter => ClientConfig::openrouter(credential.0.clone()),
+            JudgeProvider::OpenJev => ClientConfig::openjev(credential.0.clone()),
         }
         .with_endpoint_url(&config.endpoint);
         client.timeout = Duration::from_millis(u64::from(config.timeout_ms));
@@ -73,7 +84,18 @@ impl JudgeClient for SdkClient {
             .evaluate(request)
             .await
             .map(|r| r.response)
-            .map_err(|_| Error::Unavailable)
+            .map_err(|error| classify(&error))
+    }
+}
+/// A rejected credential (401/403) is told apart; every other failure is
+/// `Unavailable`. The client wraps each failed evaluation with its attempt
+/// count, so the classified cause is inside.
+fn classify(error: &tinyinference_decisions::Error) -> Error {
+    use tinyinference_decisions::Error as Sdk;
+    match error {
+        Sdk::EvaluationFailure(failure) => classify(&failure.error),
+        Sdk::Authentication => Error::Rejected,
+        _ => Error::Unavailable,
     }
 }
 /// Shared bounded native scorer; locks protect reservations only, never HTTP waits.
@@ -83,6 +105,7 @@ pub struct Engine {
     client: Arc<dyn JudgeClient>,
     clock: Arc<dyn Clock>,
     state: Arc<Mutex<(Budget, Cache)>>,
+    source: Option<Arc<dyn CredentialSource>>,
 }
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -96,6 +119,39 @@ impl Engine {
     pub fn new(config: JudgeConfig, clock: Arc<dyn Clock>) -> Result<Self> {
         let client = Arc::new(SdkClient::new(&config)?);
         Self::with_client(config, client, clock)
+    }
+    /// Construct a production scorer that, when `config` carries no
+    /// credential, asks `source` for it on the first judgement and reuses it
+    /// for [`host::HOST_CREDENTIAL_TTL_MS`]. A configured credential is used
+    /// as by [`Engine::new`].
+    /// # Errors
+    /// Rejects invalid bounded settings and endpoint/key configuration.
+    pub fn with_credential_source(
+        config: JudgeConfig,
+        source: Arc<dyn CredentialSource>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
+        Self::with_source(config, Some(source), clock, host::sdk())
+    }
+    fn with_source(
+        config: JudgeConfig,
+        source: Option<Arc<dyn CredentialSource>>,
+        clock: Arc<dyn Clock>,
+        build: host::Build,
+    ) -> Result<Self> {
+        let client: Arc<dyn JudgeClient> = match (&config.credential, &source) {
+            (Some(credential), _) => build(&config, credential)?,
+            (None, Some(source)) => Arc::new(HostClient::new(
+                config.clone(),
+                Arc::clone(source),
+                Arc::clone(&clock),
+                build,
+            )),
+            (None, None) => return Err(Error::Invalid),
+        };
+        let mut engine = Self::with_client(config, client, clock)?;
+        engine.source = source;
+        Ok(engine)
     }
     /// Inject a one-attempt typed evaluator and monotonic clock.
     /// # Errors
@@ -117,6 +173,7 @@ impl Engine {
             client,
             clock,
             state,
+            source: None,
         })
     }
     /// Validate the complete explicit initialization before activation.
@@ -124,13 +181,24 @@ impl Engine {
     /// Rejects invalid local limits or SDK endpoint/credential settings.
     pub fn validate_config(config: &JudgeConfig) -> Result<()> {
         validate(config)?;
-        SdkClient::new(config).map(|_| ())
+        match &config.credential {
+            Some(credential) => SdkClient::with_credential(config, credential).map(|_| ()),
+            // The endpoint and timeout are checked now; the placeholder key is
+            // never sent, because this client is dropped unused.
+            None => SdkClient::with_credential(config, &Secret("unset".into())).map(|_| ()),
+        }
     }
     /// Prepare a new configuration while preserving the shared reservation ledger.
     /// # Errors
     /// Rejects invalid settings without mutating the current engine.
     pub fn reconfigured(&self, config: JudgeConfig) -> Result<Self> {
-        let mut candidate = Self::new(config, Arc::clone(&self.clock))?;
+        // A fresh client: a host credential held before the reinit is dropped.
+        let mut candidate = Self::with_source(
+            config,
+            self.source.clone(),
+            Arc::clone(&self.clock),
+            host::sdk(),
+        )?;
         candidate.state = Arc::clone(&self.state);
         candidate
             .state
@@ -285,8 +353,10 @@ fn validate(config: &JudgeConfig) -> Result<()> {
         || config.cache_ttl_ms > 600_000
         || config.origins.len() > 6
         || config.thresholds.len() > 12
-        || config.credential.0.len() < 4
-        || config.credential.0.len() > 4096
+        || config
+            .credential
+            .as_ref()
+            .is_some_and(|credential| !(4..=4096).contains(&credential.0.len()))
         || config.endpoint.len() > 4096
         || config
             .origins

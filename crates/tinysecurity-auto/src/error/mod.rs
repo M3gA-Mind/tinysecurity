@@ -17,6 +17,9 @@ pub enum Error {
     /// Transport or provider unavailable.
     #[error("judge unavailable")]
     Unavailable,
+    /// The endpoint rejected the credential.
+    #[error("judge credential rejected")]
+    Rejected,
 }
 /// Native judge result with a sanitized local error.
 pub type Result<T> = std::result::Result<T, Error>;

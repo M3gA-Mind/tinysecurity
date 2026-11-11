@@ -190,3 +190,38 @@ fn a_1_18_check_payload_still_deserializes() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn judge_credential_callback_and_optional_credential_pin_their_wire_form()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        serde_json::to_value(JudgeCredentialRequest2 {
+            reason: JudgeCredentialReason2::Rejected
+        })?,
+        serde_json::json!({"reason":"rejected"})
+    );
+    assert_eq!(
+        serde_json::to_value(JudgeCredentialRequest2 {
+            reason: JudgeCredentialReason2::Initial
+        })?,
+        serde_json::json!({"reason":"initial"})
+    );
+    let empty: JudgeCredentialResponse2 = serde_json::from_value(serde_json::json!({}))?;
+    assert_eq!(empty.credential, None);
+    assert_eq!(serde_json::to_value(&empty)?, serde_json::json!({}));
+    let held = JudgeCredentialResponse2 {
+        credential: Some(Secret("host-held-key".into())),
+    };
+    assert_eq!(
+        serde_json::to_value(&held)?,
+        serde_json::json!({"credential":"host-held-key"})
+    );
+    assert!(!format!("{held:?}").contains("host-held-key"));
+    // A judge configured without a credential omits the field entirely.
+    let judge: JudgeConfig = serde_json::from_value(
+        serde_json::json!({"threshold_millis":900,"timeout_ms":1000,"origins":[]}),
+    )?;
+    assert_eq!(judge.credential, None);
+    assert!(serde_json::to_value(&judge)?.get("credential").is_none());
+    Ok(())
+}

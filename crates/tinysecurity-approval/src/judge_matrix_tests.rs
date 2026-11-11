@@ -46,7 +46,7 @@ impl tinysecurity_auto::JudgeClient for Stub {
 }
 fn config(origins: Vec<Origin>, max_requests: u32) -> JudgeConfig {
     JudgeConfig {
-        credential: Secret("fake-judge-key".into()),
+        credential: Some(Secret("fake-judge-key".into())),
         endpoint: "http://127.0.0.1:1/jev".into(),
         provider: JudgeProvider::TypeSafe,
         threshold_millis: 900,

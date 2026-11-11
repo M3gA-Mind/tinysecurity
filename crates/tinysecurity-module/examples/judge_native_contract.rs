@@ -178,7 +178,7 @@ fn begin(instance: u64, sequence: u64) -> EvaluateApprovalRequest2 {
 }
 fn judge(endpoint: String) -> JudgeConfig {
     JudgeConfig {
-        credential: Secret("fake-judge-key".into()),
+        credential: Some(Secret("fake-judge-key".into())),
         endpoint,
         provider: JudgeProvider::TypeSafe,
         threshold_millis: 900,
@@ -237,7 +237,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     verify_matrix(&proxy, &stub).await?;
     let mut invalid = configuration.clone();
     invalid.judge.as_mut().ok_or("judge")?.endpoint = "http://not-loopback.invalid/jev".into();
-    invalid.judge.as_mut().ok_or("judge")?.credential = Secret("invalid-candidate-key".into());
+    invalid.judge.as_mut().ok_or("judge")?.credential =
+        Some(Secret("invalid-candidate-key".into()));
     assert!(
         lifecycle
             .reinitialize(&loaded_name, serde_json::to_value(invalid)?)

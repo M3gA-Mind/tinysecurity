@@ -47,7 +47,7 @@ impl tinysecurity_auto::Clock for TestClock {
 }
 fn judge_config() -> JudgeConfig {
     JudgeConfig {
-        credential: Secret("fake-judge-key".into()),
+        credential: Some(Secret("fake-judge-key".into())),
         endpoint: "http://127.0.0.1:1/jev".into(),
         provider: JudgeProvider::TypeSafe,
         threshold_millis: 900,

@@ -205,6 +205,10 @@ pub mod callback_names2 {
     pub const KEYRING_CONSENT: &str = "ai.tinyhumans.tinysecurity.KeyringConsent2";
     /// Exact keyring consent member.
     pub const CONSENT: &str = "Consent";
+    /// Confidential host source of the judge credential, asked lazily.
+    pub const JUDGE_CREDENTIAL_HOST: &str = "ai.tinyhumans.tinysecurity.JudgeCredentialHost2";
+    /// Exact judge credential member.
+    pub const CREDENTIAL: &str = "Credential";
     /// Versioned durable audit callback.
     pub const AUDIT_SINK: &str = "ai.tinyhumans.tinysecurity.AuditSink2";
     /// Versioned scoped storage callback seam.

@@ -2135,6 +2135,8 @@ fn configured_audit(
 fn configured_automatic(
     config: Option<tinysecurity_bus::JudgeConfig>,
     approvals: Option<&Arc<tinysecurity::approval::Engine>>,
+    connection: &Connection,
+    host: Option<&str>,
 ) -> BusResult<Option<Arc<tinysecurity::auto::Engine>>> {
     let Some(config) = config else {
         return Ok(None);
@@ -2142,13 +2144,21 @@ fn configured_automatic(
     let engine =
         approvals.ok_or_else(|| tinybus::Error::failed("judge approval authority unavailable"))?;
     let previous = engine.previous_automatic().map_err(approval_failure)?;
+    let clock = Arc::new(tinysecurity::auto::SystemClock::default());
     let candidate = if let Some(previous) = previous {
         previous.reconfigured(config)
+    } else if config.credential.is_some() {
+        tinysecurity::auto::Engine::new(config, clock)
     } else {
-        tinysecurity::auto::Engine::new(
-            config,
-            Arc::new(tinysecurity::auto::SystemClock::default()),
-        )
+        // Without a configured credential only the init-bound trusted host may supply one.
+        let host =
+            host.ok_or_else(|| tinybus::Error::failed("judge credential host unavailable"))?;
+        let source = Arc::new(judge::HostCredential::new(
+            connection,
+            host,
+            config.timeout_ms,
+        ));
+        tinysecurity::auto::Engine::with_credential_source(config, source, clock)
     }
     .map_err(|_| tinybus::Error::failed("invalid judge initialization"))?;
     Ok(Some(Arc::new(candidate)))
@@ -2413,7 +2423,12 @@ async fn setup(connection: Connection, mut config: ModuleConfig) -> BusResult<()
         },
         device.as_ref(),
     )?;
-    let judge = configured_automatic(judge_config, approvals.as_ref().map(|(_, e)| e))?;
+    let judge = configured_automatic(
+        judge_config,
+        approvals.as_ref().map(|(_, e)| e),
+        &connection,
+        requested_host.as_deref(),
+    )?;
     if let Some(active) = ACTIVE.get() {
         let generation = candidate.info().generation;
         {
@@ -2555,6 +2570,8 @@ mod device_pairing;
 
 #[path = "adapter_crypto.rs"]
 mod crypto;
+#[path = "adapter_judge.rs"]
+mod judge;
 
 #[path = "adapter_secret.rs"]
 pub(crate) mod secret;

@@ -35,7 +35,7 @@ impl JudgeClient for Fake {
 }
 fn config() -> JudgeConfig {
     JudgeConfig {
-        credential: Secret("fake-judge-key".into()),
+        credential: Some(Secret("fake-judge-key".into())),
         endpoint: "http://127.0.0.1:1/jev".into(),
         provider: JudgeProvider::TypeSafe,
         threshold_millis: 900,
@@ -482,7 +482,7 @@ async fn class_origin_thresholds_invalid_config_and_reconfiguration_cannot_reuse
             4 => invalid.budget_window_ms = 0,
             5 => invalid.cache_entries = 1025,
             6 => invalid.cache_ttl_ms = 600_001,
-            7 => invalid.credential.0 = "a".into(),
+            7 => invalid.credential = Some(Secret("a".into())),
             8 => invalid.endpoint = "x".repeat(4097),
             9 => invalid.origins.push(Origin::Operator),
             10 => invalid.thresholds.push(invalid.thresholds[0].clone()),
@@ -535,5 +535,180 @@ async fn legitimate_reconfiguration_shrinks_shared_cache_and_zero_clears_it() ->
     cfg.cache_entries = 0;
     let disabled = candidate.reconfigured(cfg)?;
     assert_eq!(disabled.state.lock().map_err(|_| Error::Budget)?.1.len(), 0);
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct Host {
+    asks: Mutex<Vec<bool>>,
+    credential: Mutex<Option<Secret>>,
+}
+#[async_trait::async_trait]
+impl CredentialSource for Host {
+    async fn credential(&self, rejected: bool) -> Option<Secret> {
+        self.asks.lock().ok()?.push(rejected);
+        self.credential.lock().ok()?.clone()
+    }
+}
+fn host(credential: Option<&str>) -> Arc<Host> {
+    Arc::new(Host {
+        asks: Mutex::default(),
+        credential: Mutex::new(credential.map(|c| Secret(c.into()))),
+    })
+}
+fn asks(host: &Host) -> Result<Vec<bool>> {
+    Ok(host.asks.lock().map_err(|_| Error::Unavailable)?.clone())
+}
+/// A judge with no configured credential, uncached and with room in its budget.
+fn hosted(host: &Arc<Host>, client: &Arc<Fake>, clock: &Arc<TestClock>) -> Result<Engine> {
+    let mut cfg = config();
+    cfg.credential = None;
+    cfg.cache_ttl_ms = 0;
+    cfg.max_requests = 100;
+    let client = Arc::clone(client);
+    Engine::with_source(
+        cfg,
+        Some(Arc::clone(host) as Arc<dyn CredentialSource>),
+        Arc::clone(clock) as Arc<dyn Clock>,
+        Arc::new(move |_, _| Ok(Arc::clone(&client) as Arc<dyn JudgeClient>)),
+    )
+}
+async fn outcome(engine: &Engine) -> Result<JudgeOutcome2> {
+    let registry = registry().map_err(|_| Error::Invalid)?;
+    Ok(engine
+        .evaluate(&input(), &registry)
+        .await?
+        .ok_or(Error::Invalid)?
+        .outcome)
+}
+
+#[tokio::test]
+async fn a_hosted_judge_asks_on_first_use_and_reuses_the_credential_for_five_minutes() -> Result<()>
+{
+    let host = host(Some("host-held-key"));
+    let clock = Arc::new(TestClock::default());
+    let engine = hosted(&host, &fake([0.9, 0.9, 0.1]), &clock)?;
+    // Construction asks nothing: the host is never called during load.
+    assert_eq!(asks(&host)?, Vec::<bool>::new());
+    assert_eq!(outcome(&engine).await?, JudgeOutcome2::Qualified);
+    clock
+        .0
+        .store(host::HOST_CREDENTIAL_TTL_MS - 1, Ordering::SeqCst);
+    assert_eq!(outcome(&engine).await?, JudgeOutcome2::Qualified);
+    assert_eq!(asks(&host)?, [false]);
+    clock
+        .0
+        .store(host::HOST_CREDENTIAL_TTL_MS, Ordering::SeqCst);
+    assert_eq!(outcome(&engine).await?, JudgeOutcome2::Qualified);
+    assert_eq!(asks(&host)?, [false, false]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn no_usable_host_credential_sends_the_judgement_to_a_person() -> Result<()> {
+    let clock = Arc::new(TestClock::default());
+    for credential in [None, Some("abc")] {
+        let host = host(credential);
+        let engine = hosted(&host, &fake([0.9, 0.9, 0.1]), &clock)?;
+        assert_eq!(outcome(&engine).await?, JudgeOutcome2::Unavailable);
+        assert_eq!(asks(&host)?, [false]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rejected_credential_is_dropped_and_the_next_ask_says_so() -> Result<()> {
+    let host = host(Some("host-held-key"));
+    let clock = Arc::new(TestClock::default());
+    let client = fake([0.9, 0.9, 0.1]);
+    *client.response.lock().map_err(|_| Error::Unavailable)? = Err(Error::Rejected);
+    let engine = hosted(&host, &client, &clock)?;
+    assert_eq!(outcome(&engine).await?, JudgeOutcome2::Unavailable);
+    *client.response.lock().map_err(|_| Error::Unavailable)? = Ok(response([0.9, 0.9, 0.1]));
+    assert_eq!(outcome(&engine).await?, JudgeOutcome2::Qualified);
+    assert_eq!(outcome(&engine).await?, JudgeOutcome2::Qualified);
+    // Asked again at once, flagged as a rejection, then reused.
+    assert_eq!(asks(&host)?, [false, true]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reinit_drops_the_host_credential() -> Result<()> {
+    let host = host(Some("host-held-key"));
+    let clock = Arc::new(TestClock::default());
+    let engine = hosted(&host, &fake([0.9, 0.9, 0.1]), &clock)?;
+    outcome(&engine).await?;
+    let mut cfg = config();
+    cfg.credential = None;
+    let reinit = engine.reconfigured(cfg)?;
+    // The rebuilt engine talks to the unreachable fixture endpoint, but it has
+    // to ask the host again first.
+    outcome(&reinit).await?;
+    assert_eq!(asks(&host)?, [false, false]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_judge_without_credential_needs_a_host_source() -> Result<()> {
+    let mut cfg = config();
+    cfg.credential = None;
+    Engine::validate_config(&cfg)?;
+    assert_eq!(
+        Engine::new(cfg.clone(), Arc::new(TestClock::default())).err(),
+        Some(Error::Invalid)
+    );
+    let source: Arc<dyn CredentialSource> = host(Some("host-held-key"));
+    assert!(
+        Engine::with_credential_source(
+            cfg.clone(),
+            Arc::clone(&source),
+            Arc::new(TestClock::default())
+        )
+        .is_ok()
+    );
+    // A configured credential is used as configured, whatever the source.
+    assert!(
+        Engine::with_credential_source(config(), source, Arc::new(TestClock::default())).is_ok()
+    );
+    let client = HostClient::new(
+        cfg.clone(),
+        host(None),
+        Arc::new(TestClock::default()),
+        host::sdk(),
+    );
+    assert_eq!(format!("{client:?}"), "HostClient([REDACTED])");
+    cfg.endpoint = "x".repeat(4097);
+    assert!(Engine::validate_config(&cfg).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_endpoint_refusing_the_credential_is_reported_as_rejected() -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    let port = listener
+        .local_addr()
+        .map_err(|_| Error::Unavailable)?
+        .port();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.ok()?;
+        let mut buffer = vec![0; 65_536];
+        let _ = stream.read(&mut buffer).await.ok()?;
+        stream
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .ok()
+    });
+    let mut cfg = config();
+    cfg.endpoint = format!("http://127.0.0.1:{port}/jev");
+    let client = SdkClient::new(&cfg)?;
+    let registry = registry().map_err(|_| Error::Invalid)?;
+    let request = request(&input(), &registry)?;
+    assert_eq!(client.evaluate(&request).await.err(), Some(Error::Rejected));
+    let _ = server.await;
     Ok(())
 }

@@ -54,7 +54,9 @@ discretionary policy is disabled. A claimed command class cannot authorize a
 call: the engine must compute it or conservatively strengthen it. Unknown commands are writes.
 
 Judge credentials are resolved by the host's backend credential resolver and
-injected only at init/reinit. They never appear in per-call arguments, debug
+injected at init/reinit, or, when the config omits one, served by the trusted
+host's confidential `JudgeCredentialHost2` callback on first use and reused for at
+most five minutes. They never appear in per-call arguments, debug
 formatting, logs, approval records or audit events. Debug output for any config
 carrying secrets is redacted. Init configuration serialization intentionally
 carries credentials to the trusted SDK loading boundary and must never be used
