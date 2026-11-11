@@ -3,7 +3,8 @@
 //! Authority comes from SDK initialization and the authenticated trusted-host
 //! peer. Secrets travel only over confidential transport, are wiped after use
 //! and never enter `PolicyInfo`, logs, errors or audit rows. Keyring access
-//! requires a fresh human consent callback for every operation.
+//! requires a fresh human consent callback for every operation, except a read
+//! covered by a host-granted, module-enforced read grant.
 use super::{Arc, BusResult, PolicyService};
 use std::sync::{Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -19,10 +20,11 @@ use tinysecurity::crypto::{
     secretstore::{SecretStore, Zeroizing},
 };
 use tinysecurity_bus::{
-    CryptoConfig2, KeyringAccess2, KeyringBackend2, KeyringConsentOutcome2, KeyringConsentRequest2,
-    KeyringConsentResponse2, KeyringOperation2, KeyringRequest2, KeyringResponse2,
-    MAX_CRYPTO_PAYLOAD_BYTES, PairingOperation2, PairingRequest2, PairingResponse2,
-    PasswordOperation2, PasswordPayload2, PasswordRequest2, PasswordResponse2, callback_names2,
+    AccessTier, CallerContext, CryptoConfig2, KeyringAccess2, KeyringBackend2,
+    KeyringConsentOutcome2, KeyringConsentRequest2, KeyringConsentResponse2, KeyringOperation2,
+    KeyringReadGrant2, KeyringRequest2, KeyringResponse2, MAX_CRYPTO_PAYLOAD_BYTES, Origin,
+    PairingOperation2, PairingRequest2, PairingResponse2, PasswordOperation2, PasswordPayload2,
+    PasswordRequest2, PasswordResponse2, callback_names2,
 };
 use zeroize::Zeroize;
 
@@ -65,6 +67,61 @@ struct Consent {
 struct KeyringState {
     store: Arc<dyn SecretStore>,
     consent: Consent,
+    /// Host opt-in; absent, every operation asks.
+    read_grant: Option<KeyringReadGrant2>,
+    /// Live read grants, oldest first; memory only, so a restart or reinit
+    /// (which builds a new state) ends them all.
+    grants: Mutex<Vec<Grant>>,
+}
+/// Most read grants held at once; past it the oldest is dropped, so its next
+/// read asks again.
+const MAX_READ_GRANTS: usize = 64;
+/// A read grant covers later reads of one entry by one verified consumer. The
+/// purpose is free text, not an identity, so it is not part of the key.
+struct Grant {
+    agent: String,
+    origin: Origin,
+    tier: AccessTier,
+    name: String,
+    /// Monotonic expiry in milliseconds.
+    expires_ms: u64,
+}
+impl Grant {
+    fn covers(&self, caller: &CallerContext, name: &str) -> bool {
+        self.agent == caller.agent
+            && self.origin == caller.origin
+            && self.tier == caller.tier
+            && self.name == name
+    }
+}
+impl KeyringState {
+    fn granted(&self, caller: &CallerContext, name: &str, now: u64) -> BusResult<bool> {
+        let mut grants = self.grants.lock().map_err(|_| denied())?;
+        grants.retain(|grant| grant.expires_ms > now);
+        Ok(grants.iter().any(|grant| grant.covers(caller, name)))
+    }
+    fn grant(&self, caller: &CallerContext, name: &str, expires_ms: u64) -> BusResult<()> {
+        let mut grants = self.grants.lock().map_err(|_| denied())?;
+        grants.retain(|grant| !grant.covers(caller, name));
+        if grants.len() >= MAX_READ_GRANTS {
+            grants.remove(0);
+        }
+        grants.push(Grant {
+            agent: caller.agent.clone(),
+            origin: caller.origin.clone(),
+            tier: caller.tier.clone(),
+            name: name.to_owned(),
+            expires_ms,
+        });
+        Ok(())
+    }
+    /// End the grants for `name`, or every grant; reports whether any ended.
+    fn revoke(&self, name: Option<&str>) -> BusResult<bool> {
+        let mut grants = self.grants.lock().map_err(|_| denied())?;
+        let before = grants.len();
+        grants.retain(|grant| name.is_some_and(|name| grant.name != name));
+        Ok(grants.len() != before)
+    }
 }
 struct Deny;
 impl NativePairingConsumer for Deny {
@@ -155,7 +212,10 @@ fn validate(config: &CryptoConfig2) -> BusResult<()> {
     }
     if let Some(keyring) = &config.keyring
         && (!control_free(&keyring.service, 128)
-            || !(1..=300_000).contains(&keyring.consent_timeout_ms))
+            || !(1..=300_000).contains(&keyring.consent_timeout_ms)
+            || keyring
+                .read_grant
+                .is_some_and(|grant| !(1..=86_400_000).contains(&grant.max_ttl_ms)))
     {
         return Err(denied());
     }
@@ -191,6 +251,11 @@ fn configure(
                     if !same {
                         return Err(denied());
                     }
+                }
+                // The state outlives a reinit, so end every read grant here:
+                // the host decides again what it trusts.
+                if let Some(keyring) = &state.keyring {
+                    keyring.revoke(None)?;
                 }
                 Ok(Some(state))
             }
@@ -252,6 +317,8 @@ fn build(config: &mut CryptoConfig2, init: &Initialization<'_>) -> BusResult<Bui
                     #[cfg(test)]
                     ordinary: false,
                 },
+                read_grant: keyring.read_grant,
+                grants: Mutex::default(),
             })
         })
         .transpose()?;
@@ -386,6 +453,7 @@ impl PolicyService {
             KeyringOperation2::Get { name } => Access::Get(name),
             KeyringOperation2::Set { name, value } => Access::Set(name, Zeroizing::new(value)),
             KeyringOperation2::Delete { name } => Access::Delete(name),
+            KeyringOperation2::RevokeGrants { name } => Access::Revoke(name),
         };
         keyring_inner(&state, &request, operation).await
     }
@@ -469,12 +537,17 @@ async fn password_inner(
     }
 }
 
+/// Ask the host; on `Allowed`, returns the clamped read-grant lifetime the
+/// host chose, if this was a read it was offered on.
 async fn consent(
     keyring: &KeyringState,
     request: &KeyringRequest2,
     access: KeyringAccess2,
     name: &str,
-) -> BusResult<()> {
+) -> BusResult<Option<u32>> {
+    let offer = keyring
+        .read_grant
+        .filter(|_| access == KeyringAccess2::Read);
     let proxy = keyring
         .consent
         .connection
@@ -490,6 +563,7 @@ async fn consent(
         access,
         name: name.to_owned(),
         timeout_ms: keyring.consent.timeout_ms,
+        offer,
     },);
     // The host serves KeyringConsent2 as a confidential callback endpoint and
     // refuses an ordinary call.
@@ -509,7 +583,10 @@ async fn consent(
         _ => consent_error(KeyringConsentOutcome2::Unavailable),
     })?;
     match reply.outcome {
-        KeyringConsentOutcome2::Allowed => Ok(()),
+        KeyringConsentOutcome2::Allowed => Ok(offer
+            .zip(reply.grant)
+            .map(|(offer, grant)| grant.ttl_ms.min(offer.max_ttl_ms))
+            .filter(|ttl| *ttl > 0)),
         outcome => Err(consent_error(outcome)),
     }
 }
@@ -518,6 +595,7 @@ enum Access {
     Get(String),
     Set(String, Zeroizing<Vec<u8>>),
     Delete(String),
+    Revoke(Option<String>),
 }
 async fn keyring_inner(
     state: &Arc<CryptoState>,
@@ -537,11 +615,37 @@ async fn keyring_inner(
             (KeyringAccess2::Write, name)
         }
         Access::Delete(name) => (KeyringAccess2::Delete, name),
+        Access::Revoke(name) => {
+            // Ending a grant needs no consent and is never rate-limited away.
+            if keyring.read_grant.is_none() {
+                return Err(denied());
+            }
+            if let Some(name) = name {
+                tinysecurity::crypto::secretstore::validate_name(name).map_err(|_| denied())?;
+            }
+            return Ok(KeyringResponse2 {
+                found: keyring.revoke(name.as_deref())?,
+                bytes: Vec::new(),
+            });
+        }
     };
     tinysecurity::crypto::secretstore::validate_name(name).map_err(|_| denied())?;
     state.admit()?;
-    // Fresh human consent for exactly this operation precedes any backend access.
-    consent(keyring, request, access, name).await?;
+    let now = state.clock.monotonic_ms();
+    if access == KeyringAccess2::Read {
+        // A live grant for this consumer and entry stands in for the prompt.
+        if !keyring.granted(&request.caller, name, now)?
+            && let Some(ttl) = consent(keyring, request, access, name).await?
+        {
+            let expires = now.checked_add(u64::from(ttl)).ok_or_else(denied)?;
+            keyring.grant(&request.caller, name, expires)?;
+        }
+    } else {
+        // A write or delete changes what a grant was given for: end it first,
+        // whatever the human then decides, and always ask.
+        keyring.revoke(Some(name))?;
+        consent(keyring, request, access, name).await?;
+    }
     match &operation {
         Access::Get(name) => {
             let found = keyring.store.get(name).await.map_err(|_| denied())?;
@@ -576,6 +680,8 @@ async fn keyring_inner(
                 bytes: Vec::new(),
             })
         }
+        // Answered before any consent or backend access above.
+        Access::Revoke(_) => Err(denied()),
     }
 }
 

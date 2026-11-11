@@ -137,6 +137,15 @@ pub struct ApprovalRecord {
     pub expires_at_ms: u64,
     /// Durable lifecycle state.
     pub state: ApprovalState,
+    /// Tool the undecided request was for; imported only for a pending orphan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// Human-readable summary; redacted again before storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Argument JSON as the legacy store kept it; redacted again before storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args_redacted: Option<String>,
 }
 /// `ListPendingRequest` payload, reserved until its engine is implemented.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
