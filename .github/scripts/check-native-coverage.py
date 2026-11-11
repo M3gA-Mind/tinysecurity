@@ -186,7 +186,11 @@ def check_changed(lines, changed, minimum, compiled, platform="windows"):
             total += 1
             covered += lines[name][line] > 0
     if not total:
-        raise ValueError('no measured changed executable lines in workspace')
+        # Every changed line is non-executable (a constant table entry, a
+        # plain comment, an attribute): there is nothing to measure. Required
+        # platform sources were checked above, and every executable source
+        # still needs LCOV, so this cannot hide missing instrumentation.
+        return None
     if covered * 100 < minimum * total:
         raise ValueError(f'changed lines: {covered}/{total} below {minimum}%')
     return covered, total

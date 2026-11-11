@@ -197,6 +197,17 @@ operation first calls the host's `ai.tinyhumans.tinysecurity.KeyringConsent2`
 (never the value), and proceeds only on an explicit allow. Invalid names or
 purposes, oversized values and denied or timed-out consent never reach the backend.
 
+A host can opt in to read grants with `KeyringConfig2.read_grant { max_ttl_ms }`
+(at most 24 hours). Absent, nothing changes on the wire. With it, a read's consent
+request carries `offer`, and an `Allowed` reply may carry `grant { ttl_ms }`. The
+module clamps the lifetime to the ceiling and then lets later reads of the same
+entry by the same agent, origin and tier skip the prompt. The purpose is not part
+of the key. Grants live only in module memory, at most 64 at a time, with the
+oldest dropped first. Granted reads are still rate-admitted. Writes and deletes are
+never offered a grant and always ask. A write or delete of the entry, a reinit, a
+`RevokeGrants` operation (one entry, or all) and process exit each end the grant,
+before any backend access.
+
 `PairingControl2` exposes `Status`, `Authenticate` (constant-time bearer check
 against legacy tokens), `Invalidate` and `Revoke` for accounts registered at init.
 Challenge issuance and numeric verification (`Begin`/`Verify`) are not exposed:

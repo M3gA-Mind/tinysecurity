@@ -104,7 +104,10 @@ callers may only shorten it.
 Restart preserves history and unexpired exact reusable grants. A fresh module
 instance cannot resume another instance's pending or once-only execution.
 Legacy imports preserve sanitized history in denied rows and never revive broad
-grants. Cron external effects deny before automatic or reusable shortcuts.
+grants. An undecided legacy row that has not expired is imported as a pending
+orphan instead: `ListApprovals2` returns it with its redacted tool name,
+summary and arguments, it belongs to no live instance so only a human denial
+resolves it, and no call can consume it. Cron external effects deny before automatic or reusable shortcuts.
 SaaS has no automatic bypass and needs a verified prompt when approval is due.
 An optional [native Jev scorer](../tinysecurity-auto/README.md) can qualify a
 verified pending request before prompt delivery. Its sanitized evidence is stored

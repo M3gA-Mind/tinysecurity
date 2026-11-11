@@ -622,6 +622,9 @@ async fn imported_legacy_allow_keeps_history_but_never_becomes_a_live_grant() ->
         caller: request().request.caller,
         expires_at_ms: u64::MAX,
         state: ApprovalState::Allowed,
+        tool_name: Some("shell".into()),
+        summary: Some("run ls".into()),
+        args_redacted: Some(r#"{"cmd":"ls"}"#.into()),
     };
     let row = owner
         .import_history(ApprovalHistoryImport2 {
@@ -637,7 +640,72 @@ async fn imported_legacy_allow_keeps_history_but_never_becomes_a_live_grant() ->
             .contains("allowed")
     );
     assert_eq!(row.state, ApprovalLifecycle2::Denied);
+    // A decided legacy row keeps the inert labels whatever it carried.
+    assert_eq!(row.tool_name, "imported-history");
+    assert_eq!(row.args_redacted, "{}");
     assert!(owner.consume(action(&row, 2)).await.is_err());
+    Ok(())
+}
+
+fn pending_legacy(tool: &str, expires_at_ms: u64) -> ApprovalHistoryImport2 {
+    ApprovalHistoryImport2 {
+        scope_id: request().scope_id,
+        legacy: ApprovalRecord {
+            request_id: "still-pending".into(),
+            fingerprint: format!("legacy-{tool}"),
+            caller: request().request.caller,
+            expires_at_ms,
+            state: ApprovalState::Pending,
+            tool_name: Some(tool.into()),
+            summary: Some("run ls".into()),
+            args_redacted: Some(r#"{"cmd":"ls"}"#.into()),
+        },
+        audit: audit(1),
+    }
+}
+
+#[tokio::test]
+async fn an_undecided_legacy_row_is_imported_as_a_pending_orphan_only_a_human_can_deny()
+-> Result<()> {
+    let f = Arc::new(Fixture::default());
+    let owner = engine(f.clone(), Arc::new(TestClock::default()))?;
+    let row = owner.import_history(pending_legacy("shell", 1_000)).await?;
+    // Listed, and renderable from the row alone.
+    assert_eq!(row.state, ApprovalLifecycle2::Pending);
+    assert_eq!(row.tool_name, "shell");
+    assert_eq!(row.summary, "run ls");
+    assert!(row.args_redacted.contains("cmd"), "{}", row.args_redacted);
+    assert_eq!(row.expires_at_ms, 1_000);
+    assert!(row.attribution.is_none());
+    let listed = owner.list(&request().scope_id).await?;
+    assert!(listed.iter().any(|r| r.request_id == row.request_id));
+    // A restart re-runs the import; it must not add a second row.
+    let again = owner.import_history(pending_legacy("shell", 1_000)).await?;
+    assert_eq!(again.request_id, row.request_id);
+    // Never consumable, and an approval is refused: approving resumes nothing.
+    assert!(owner.consume(action(&row, 2)).await.is_err());
+    assert!(owner.decide(decision(&row)).await.is_err());
+    f.choice.store(3, Ordering::SeqCst);
+    let denied = owner.decide(decision(&row)).await?;
+    assert_eq!(denied.state, ApprovalLifecycle2::Denied);
+    assert!(denied.attribution.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_expired_or_native_legacy_row_is_not_revived_as_a_renderable_request() -> Result<()> {
+    let f = Arc::new(Fixture::default());
+    let owner = engine(f, Arc::new(TestClock::default()))?;
+    // Expired before the import: inert history, as for a decided row.
+    let expired = owner.import_history(pending_legacy("shell", 0)).await?;
+    assert_eq!(expired.state, ApprovalLifecycle2::Denied);
+    assert_eq!(expired.tool_name, "imported-history");
+    // A native grant name never reaches the native grant checks.
+    let native = owner
+        .import_history(pending_legacy("native_secret_grant", 1_000))
+        .await?;
+    assert_eq!(native.state, ApprovalLifecycle2::Pending);
+    assert_eq!(native.tool_name, "imported-history");
     Ok(())
 }
 #[tokio::test]

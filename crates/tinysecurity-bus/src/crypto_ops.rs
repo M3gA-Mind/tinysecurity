@@ -27,7 +27,8 @@ pub enum KeyringBackend2 {
     },
 }
 
-/// Init-only keyring settings; consent is mandatory for every operation.
+/// Init-only keyring settings; consent is mandatory for every operation
+/// unless a read grant covers a repeated read.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyringConfig2 {
@@ -37,6 +38,27 @@ pub struct KeyringConfig2 {
     pub backend: KeyringBackend2,
     /// Bounded `KeyringConsent2` callback wait, in 1..=300000 milliseconds.
     pub consent_timeout_ms: u32,
+    /// Opt-in read grants; absent keeps one consent per operation and adds
+    /// nothing to the consent wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_grant: Option<KeyringReadGrant2>,
+}
+
+/// Longest read grant the module accepts, and the scope a read consent offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyringReadGrant2 {
+    /// Grant ceiling in 1..=86400000 milliseconds (24 hours).
+    pub max_ttl_ms: u32,
+}
+
+/// Read grant a host returns with an `Allowed` read consent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyringGrant2 {
+    /// Requested lifetime; the module clamps it to the offered ceiling, and 0
+    /// grants nothing.
+    pub ttl_ms: u32,
 }
 
 /// One registered pairing account; tokens are legacy configuration bearer values.
@@ -158,6 +180,13 @@ pub enum KeyringOperation2 {
         /// Secret name.
         name: String,
     },
+    /// End read grants without consent or backend access: those for one
+    /// entry, or every grant when `name` is absent. Needs `read_grant`.
+    RevokeGrants {
+        /// Secret name, or absent for every entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 /// Keyring request with verified caller facts for the consent prompt.
@@ -208,6 +237,10 @@ pub struct KeyringConsentRequest2 {
     pub name: String,
     /// Bounded wait.
     pub timeout_ms: u32,
+    /// Read scope the host may grant; present only on a read when the host
+    /// configured `read_grant`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<KeyringReadGrant2>,
 }
 
 /// Outcome from the host's keyring consent decision.
@@ -230,6 +263,10 @@ pub enum KeyringConsentOutcome2 {
 pub struct KeyringConsentResponse2 {
     /// Explicit outcome for exactly this request.
     pub outcome: KeyringConsentOutcome2,
+    /// Read grant; honoured only with `Allowed` on a request that carried an
+    /// offer, and ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<KeyringGrant2>,
 }
 
 /// Pairing operation on a registered account.
