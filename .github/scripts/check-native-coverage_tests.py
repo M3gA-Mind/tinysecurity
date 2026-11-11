@@ -184,6 +184,15 @@ class NativeCoverageAdmission(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'below 80'):
             gate.check_changed({WINDOWS: {3: 0}, ACL: {4: 1}}, {WINDOWS: {3}, ACL: {4}}, 80, COMPILED)
 
+    def test_changes_with_no_executable_line_skip_only_changed_line_gate(self):
+        # Line 9 of the adapter is a changed constant entry with no LCOV line.
+        compiled = {**COMPILED, ADAPTER: (4, 4)}
+        lines = {WINDOWS: {3: 1}, ACL: {4: 1}, ADAPTER: {10: 1}}
+        self.assertIsNone(gate.check_changed(lines, {ADAPTER: {9}}, 80, compiled))
+        # The inventory checks still run first: an uninstrumented source fails.
+        with self.assertRaisesRegex(ValueError, 'missing executable LCOV source'):
+            gate.check_changed({WINDOWS: {3: 1}, ACL: {4: 1}}, {ADAPTER: {9}}, 80, compiled)
+
     def test_no_production_changes_skip_only_changed_line_gate(self):
         self.assertIsNone(gate.check_changed({WINDOWS: {3: 1}, ACL: {4: 1}}, {}, 80, COMPILED))
         self.assertEqual(gate.changed_lines('+++ b/crates/a/src/sink_tests.rs\n@@ -0,0 +1 @@\n+x\n'), {})
