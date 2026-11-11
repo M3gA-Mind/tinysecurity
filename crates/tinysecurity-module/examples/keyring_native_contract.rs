@@ -37,6 +37,7 @@ impl Consenter {
             } else {
                 KeyringConsentOutcome2::ConsentDenied
             },
+            grant: None,
         }))
         .await
     }
@@ -120,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     directory: store.path().canonicalize()?.to_string_lossy().into_owned(),
                 },
                 consent_timeout_ms: 5000,
+                read_grant: None,
             }),
             pairing: None,
         }),

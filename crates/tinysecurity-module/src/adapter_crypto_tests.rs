@@ -53,6 +53,8 @@ impl Drop for Fixture {
 #[derive(Clone)]
 struct Consenter {
     allow: Arc<std::sync::atomic::AtomicBool>,
+    /// Read grant returned with every answer, in milliseconds; 0 returns none.
+    grant: Arc<std::sync::atomic::AtomicU32>,
     seen: Arc<Mutex<Vec<KeyringConsentRequest2>>>,
 }
 #[tinybus::interface(name = "ai.tinyhumans.tinysecurity.KeyringConsent2")]
@@ -64,12 +66,14 @@ impl Consenter {
         // The prompt carries the secret name but never a value.
         assert!(!serde_json::to_string(&request)?.contains("private-value"));
         self.seen.lock().map_err(|_| denied())?.push(request);
+        let ttl_ms = self.grant.load(std::sync::atomic::Ordering::SeqCst);
         std::future::ready(Ok(KeyringConsentResponse2 {
             outcome: if self.allow.load(std::sync::atomic::Ordering::SeqCst) {
                 KeyringConsentOutcome2::Allowed
             } else {
                 KeyringConsentOutcome2::ConsentDenied
             },
+            grant: (ttl_ms > 0).then_some(tinysecurity_bus::KeyringGrant2 { ttl_ms }),
         }))
         .await
     }
@@ -85,6 +89,7 @@ fn config(dir: &std::path::Path) -> CryptoConfig2 {
                 directory: dir.to_string_lossy().into_owned(),
             },
             consent_timeout_ms: 1000,
+            read_grant: None,
         }),
         pairing: Some(tinysecurity_bus::PairingConfig2 {
             accounts: vec![
@@ -112,6 +117,20 @@ fn config(dir: &std::path::Path) -> CryptoConfig2 {
 }
 
 async fn fixture(allow: bool) -> Result<(Fixture, Consenter), Box<dyn std::error::Error>> {
+    fixture_with(
+        allow,
+        None,
+        Arc::new(tinysecurity::approval::SystemClock::default()),
+    )
+    .await
+}
+
+/// A fixture whose host configured `read_grant` and whose clock the test steps.
+async fn fixture_with(
+    allow: bool,
+    read_grant: Option<KeyringReadGrant2>,
+    clock: Arc<dyn tinysecurity::approval::Clock>,
+) -> Result<(Fixture, Consenter), Box<dyn std::error::Error>> {
     use tinybus::{Connection, broker::Broker, transport::memory::MemoryBus};
     let bus = MemoryBus::new();
     let broker = Broker::new().spawn(bus.clone()).abort_handle();
@@ -125,7 +144,16 @@ async fn fixture(allow: bool) -> Result<(Fixture, Consenter), Box<dyn std::error
     std::fs::create_dir_all(&dir)?;
     let mut init = initialization(&module, host_peer.as_str());
     init.peer = Some(Box::leak(host_peer.as_str().to_owned().into_boxed_str()));
-    let mut state = configure(Some(config(&dir)), None, &init)?.ok_or("state")?;
+    init.clock = clock;
+    let mut config = config(&dir);
+    if let Some(keyring) = config.keyring.as_mut() {
+        keyring.read_grant = read_grant;
+    }
+    if read_grant.is_some() {
+        // Grant tests make more reads than the default window admits.
+        config.operations_per_minute = 4096;
+    }
+    let mut state = configure(Some(config), None, &init)?.ok_or("state")?;
     Arc::get_mut(&mut state)
         .and_then(|state| state.keyring.as_mut())
         .ok_or("keyring")?
@@ -140,6 +168,7 @@ async fn fixture(allow: bool) -> Result<(Fixture, Consenter), Box<dyn std::error
     service.crypto = Some(state);
     let consenter = Consenter {
         allow: Arc::new(std::sync::atomic::AtomicBool::new(allow)),
+        grant: Arc::default(),
         seen: Arc::default(),
     };
     let module_peer = module.unique_name().ok_or("module")?;
@@ -499,6 +528,13 @@ fn configuration_bounds_are_enforced() {
         keyring.consent_timeout_ms = 300_001;
     }
     assert!(validate(&bad).is_err());
+    for (max_ttl_ms, valid) in [(0, false), (86_400_000, true), (86_400_001, false)] {
+        let mut grant = config(&dir);
+        if let Some(keyring) = &mut grant.keyring {
+            keyring.read_grant = Some(KeyringReadGrant2 { max_ttl_ms });
+        }
+        assert_eq!(validate(&grant).is_ok(), valid, "{max_ttl_ms}");
+    }
     let mut bad = config(&dir);
     if let Some(pairing) = &mut bad.pairing {
         pairing.in_flight = 0;
@@ -864,5 +900,244 @@ async fn keyring_consent_without_a_serving_host_is_unavailable()
         refusal.wire_name(),
         "ai.tinyhumans.tinysecurity.Error.Unavailable"
     );
+    Ok(())
+}
+
+fn get(name: &str) -> KeyringRequest2 {
+    keyring_request(KeyringOperation2::Get { name: name.into() })
+}
+fn prompts(consenter: &Consenter) -> Result<usize, Box<dyn std::error::Error>> {
+    Ok(consenter.seen.lock().map_err(|_| "seen")?.len())
+}
+/// A fixture with read grants of at most `max_ttl_ms`, a host that answers
+/// every consent with `grant_ms`, and a clock the test steps.
+async fn granting(
+    max_ttl_ms: u32,
+    grant_ms: u32,
+) -> Result<(Fixture, Consenter, Arc<StepClock>), Box<dyn std::error::Error>> {
+    let clock = Arc::new(StepClock::default());
+    let (fixture, consenter) =
+        fixture_with(true, Some(KeyringReadGrant2 { max_ttl_ms }), clock.clone()).await?;
+    consenter
+        .grant
+        .store(grant_ms, std::sync::atomic::Ordering::SeqCst);
+    Ok((fixture, consenter, clock))
+}
+
+#[tokio::test]
+async fn a_read_grant_covers_repeat_reads_until_its_clamped_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The host asks for 5 s; the module holds it to the 1 s ceiling.
+    let (fixture, consenter, clock) = granting(1_000, 5_000).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    {
+        let seen = consenter.seen.lock().map_err(|_| "seen")?;
+        assert_eq!(seen[0].offer, Some(KeyringReadGrant2 { max_ttl_ms: 1_000 }));
+    }
+    clock.0.store(999, std::sync::atomic::Ordering::SeqCst);
+    fixture.service.keyring_access(get("user:token")).await?;
+    assert_eq!(prompts(&consenter)?, 1);
+    clock.0.store(1_000, std::sync::atomic::Ordering::SeqCst);
+    fixture.service.keyring_access(get("user:token")).await?;
+    assert_eq!(prompts(&consenter)?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_read_grant_is_bound_to_the_entry_agent_origin_and_tier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, consenter, _) = granting(60_000, 60_000).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    let mut other_agent = get("user:token");
+    other_agent.caller.agent = "other".into();
+    let mut other_origin = get("user:token");
+    other_origin.caller.origin = tinysecurity_bus::Origin::Cron;
+    let mut other_tier = get("user:token");
+    other_tier.caller.tier = tinysecurity_bus::AccessTier::Write;
+    let mut other_purpose = get("user:token");
+    other_purpose.purpose = "a different purpose".into();
+    for request in [
+        get("user:other"),
+        other_agent,
+        other_origin,
+        other_tier,
+        other_purpose,
+    ] {
+        fixture.service.keyring_access(request).await?;
+    }
+    // Every request but the purpose change asked again: purpose is not bound.
+    assert_eq!(prompts(&consenter)?, 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn writes_and_deletes_always_ask_and_end_the_entrys_grant()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, consenter, _) = granting(60_000, 60_000).await?;
+    let set = || {
+        keyring_request(KeyringOperation2::Set {
+            name: "user:token".into(),
+            value: b"private-value".to_vec(),
+        })
+    };
+    let delete = || {
+        keyring_request(KeyringOperation2::Delete {
+            name: "user:token".into(),
+        })
+    };
+    fixture.service.keyring_access(set()).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    fixture.service.keyring_access(set()).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    fixture.service.keyring_access(delete()).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    {
+        let seen = consenter.seen.lock().map_err(|_| "seen")?;
+        let access: Vec<_> = seen.iter().map(|request| request.access).collect();
+        assert_eq!(
+            access,
+            [
+                KeyringAccess2::Write,
+                KeyringAccess2::Read,
+                KeyringAccess2::Write,
+                KeyringAccess2::Read,
+                KeyringAccess2::Delete,
+                KeyringAccess2::Read,
+            ]
+        );
+        // Only reads are offered a grant.
+        assert!(
+            seen.iter()
+                .all(|r| r.offer.is_some() == (r.access == KeyringAccess2::Read))
+        );
+    }
+    // A refused write still ends the grant.
+    consenter
+        .allow
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(fixture.service.keyring_access(set()).await.is_err());
+    consenter
+        .allow
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    fixture.service.keyring_access(get("user:token")).await?;
+    assert_eq!(prompts(&consenter)?, 8);
+    Ok(())
+}
+
+#[tokio::test]
+async fn revoke_grants_ends_one_entry_or_all_without_consent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, consenter, _) = granting(60_000, 60_000).await?;
+    let revoke = |name: Option<&str>| {
+        keyring_request(KeyringOperation2::RevokeGrants {
+            name: name.map(str::to_owned),
+        })
+    };
+    fixture.service.keyring_access(get("user:a")).await?;
+    fixture.service.keyring_access(get("user:b")).await?;
+    assert!(
+        fixture
+            .service
+            .keyring_access(revoke(Some("user:a")))
+            .await?
+            .found
+    );
+    assert!(
+        !fixture
+            .service
+            .keyring_access(revoke(Some("user:a")))
+            .await?
+            .found
+    );
+    assert_eq!(prompts(&consenter)?, 2);
+    fixture.service.keyring_access(get("user:a")).await?;
+    fixture.service.keyring_access(get("user:b")).await?;
+    assert_eq!(prompts(&consenter)?, 3);
+    assert!(fixture.service.keyring_access(revoke(None)).await?.found);
+    fixture.service.keyring_access(get("user:a")).await?;
+    fixture.service.keyring_access(get("user:b")).await?;
+    assert_eq!(prompts(&consenter)?, 5);
+    // A bad name is refused like any other keyring name.
+    assert!(
+        fixture
+            .service
+            .keyring_access(revoke(Some("")))
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reinit_ends_every_read_grant() -> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, consenter, _) = granting(60_000, 60_000).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    let state = fixture.service.crypto.as_ref().ok_or("state")?;
+    let current = Some(Arc::downgrade(state));
+    let init = initialization(&fixture.module, "");
+    let same = configure(None, Some(&current), &init)?.ok_or("state")?;
+    assert!(Arc::ptr_eq(&same, state));
+    fixture.service.keyring_access(get("user:token")).await?;
+    assert_eq!(prompts(&consenter)?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_grants_are_capped_and_the_oldest_is_dropped_first()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, consenter, _) = granting(60_000, 60_000).await?;
+    for index in 0..=MAX_READ_GRANTS {
+        fixture
+            .service
+            .keyring_access(get(&format!("user:n{index}")))
+            .await?;
+    }
+    let granted = MAX_READ_GRANTS + 1;
+    assert_eq!(prompts(&consenter)?, granted);
+    // The newest is still covered; the first was dropped to make room.
+    fixture
+        .service
+        .keyring_access(get(&format!("user:n{MAX_READ_GRANTS}")))
+        .await?;
+    assert_eq!(prompts(&consenter)?, granted);
+    fixture.service.keyring_access(get("user:n0")).await?;
+    assert_eq!(prompts(&consenter)?, granted + 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_read_grant_a_host_grant_is_ignored_and_nothing_is_offered()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, consenter) = fixture(true).await?;
+    consenter
+        .grant
+        .store(60_000, std::sync::atomic::Ordering::SeqCst);
+    fixture.service.keyring_access(get("user:token")).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    {
+        let seen = consenter.seen.lock().map_err(|_| "seen")?;
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|request| request.offer.is_none()));
+        assert!(!serde_json::to_string(&seen[0])?.contains("offer"));
+    }
+    // Revoking needs the opt-in too.
+    assert!(
+        fixture
+            .service
+            .keyring_access(keyring_request(KeyringOperation2::RevokeGrants {
+                name: None
+            }))
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_zero_grant_grants_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    let (fixture, consenter, _) = granting(60_000, 0).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    fixture.service.keyring_access(get("user:token")).await?;
+    assert_eq!(prompts(&consenter)?, 2);
     Ok(())
 }
