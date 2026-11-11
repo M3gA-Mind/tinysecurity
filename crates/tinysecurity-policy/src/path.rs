@@ -19,6 +19,7 @@ pub(super) const CREDENTIAL_COMPONENTS: &[&str] = &[
     ".gnupg",
     ".aws",
     ".azure",
+    ".oci",
     ".kube",
     "keychains",
     ".netrc",

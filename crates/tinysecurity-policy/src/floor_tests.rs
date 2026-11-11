@@ -164,7 +164,15 @@ fn every_vocabulary_entry_is_recognised_by_the_floor() {
 #[test]
 fn vocabulary_splits_directories_from_files_and_keeps_every_constant() {
     let vocabulary = floor_vocabulary();
-    for name in [".ssh", ".gnupg", ".aws", ".azure", ".kube", "keychains"] {
+    for name in [
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".azure",
+        ".oci",
+        ".kube",
+        "keychains",
+    ] {
         assert!(vocabulary.components.iter().any(|c| c == name), "{name}");
     }
     for name in [".netrc", ".git-credentials", ".pgpass", ".npmrc"] {
