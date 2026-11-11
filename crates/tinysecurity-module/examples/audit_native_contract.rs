@@ -152,6 +152,12 @@ impl Interface for Callback {
         Ok(reply)
     }
 }
+/// Audit sink wait. One module serves every phase, and its audit settings are
+/// immutable across reinit, so this one value has to fit them all. Mode 6
+/// reinitializes the module inside the callback, which took about 107 ms on a
+/// loaded macOS runner, past the 100 ms this used to be; mode 3 deliberately
+/// never replies and must still time out well inside the 3 s client wait.
+const AUDIT_TIMEOUT_MS: u32 = 1000;
 fn audit_config(required: bool) -> AuditConfig2 {
     AuditConfig2 {
         scope: SubjectScope {
@@ -160,7 +166,7 @@ fn audit_config(required: bool) -> AuditConfig2 {
             agent: "agent".into(),
         },
         stream_id: "a".repeat(32),
-        timeout_ms: 100,
+        timeout_ms: AUDIT_TIMEOUT_MS,
         required,
         native_path: None,
         max_bytes: 10000,
