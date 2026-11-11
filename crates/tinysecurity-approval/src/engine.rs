@@ -10,8 +10,8 @@ use tinysecurity_bus::{
     ApprovalConfig2, ApprovalDeliveryRequest2, ApprovalDeliveryResponse2, ApprovalGrants2,
     ApprovalHistoryImport2, ApprovalLifecycle2, ApprovalLoadRequest2, ApprovalLoadResponse2,
     ApprovalPurgeSessionRequest2, ApprovalRecordRequest2, ApprovalRow2, ApprovalScope2,
-    ApprovalScopeOutcome2, ApprovalScopeReceipt2, AuditCorrelation2, CallerContext, Check,
-    DecideRequest2, EvaluateApprovalRequest2, EvaluateRequest, HUMAN_ONLY_TOOLS2,
+    ApprovalScopeOutcome2, ApprovalScopeReceipt2, ApprovalState, AuditCorrelation2, CallerContext,
+    Check, DecideRequest2, EvaluateApprovalRequest2, EvaluateRequest, HUMAN_ONLY_TOOLS2,
     HumanDecisionReceipt2, MAX_APPROVAL_SCOPES2, Origin, PreauthorizeFlowRequest2,
     RecordExecutionRequest2, RedactMode, RegisterApprovalScopeRequest2,
     RetireApprovalScopeRequest2, SubjectScope, ToolCall, VerifyHumanRequest2,
@@ -1060,28 +1060,65 @@ impl Engine {
             return Ok(existing);
         }
         let now = self.now()?;
+        let redactor = self.redactor()?;
+        // An undecided legacy row that has not expired comes back as a pending
+        // orphan the host can list and render. It belongs to no live host
+        // instance, so `decide` accepts only a denial, and its binding is the
+        // synthetic history call above, so no real call can ever consume it.
+        let legacy = &request.legacy;
+        let orphan = legacy.state == ApprovalState::Pending && legacy.expires_at_ms > now;
+        let imported = |value: Option<&String>, mode, inert: &str| match value {
+            Some(value) if orphan => binding::text(&redactor, value, mode),
+            _ => Ok(inert.to_owned()),
+        };
+        // A native or device-crypto name would route the row through the native
+        // grant checks; an orphan keeps the inert label instead.
+        let tool = legacy
+            .tool_name
+            .as_ref()
+            .filter(|tool| !binding::is_native(tool) && tool.as_str() != "device_crypto");
         let row = ApprovalRow2 {
             request_id: binding::opaque()?,
             version: 1,
             binding: bound,
-            host_instance: self.instance.clone(),
+            host_instance: if orphan {
+                binding::opaque()?
+            } else {
+                self.instance.clone()
+            },
             nonce: binding::opaque()?,
-            tool_name: "imported-history".into(),
+            tool_name: imported(tool, RedactMode::Text, "imported-history")?,
             session_id: None,
             audit_error: None,
             external_effect: false,
-            args_redacted: "{}".into(),
-            summary: "imported-history".into(),
+            args_redacted: imported(
+                legacy.args_redacted.as_ref(),
+                RedactMode::StructuredLogArguments,
+                "{}",
+            )?,
+            summary: imported(
+                legacy.summary.as_ref(),
+                RedactMode::Text,
+                "imported-history",
+            )?,
             created_at_ms: now,
-            expires_at_ms: now.checked_add(1).ok_or(Error::Invalid)?,
-            state: ApprovalLifecycle2::Denied,
+            expires_at_ms: if orphan {
+                legacy.expires_at_ms
+            } else {
+                now.checked_add(1).ok_or(Error::Invalid)?
+            },
+            state: if orphan {
+                ApprovalLifecycle2::Pending
+            } else {
+                ApprovalLifecycle2::Denied
+            },
             choice: None,
-            attribution: Some("legacy-history-only".into()),
+            attribution: (!orphan).then(|| "legacy-history-only".into()),
             decision_ticket_sha256: None,
             outcome: None,
             reservation_id: None,
             legacy_history_json: Some(binding::text(
-                &self.redactor()?,
+                &redactor,
                 std::str::from_utf8(&encoded).map_err(|_| Error::Invalid)?,
                 RedactMode::StructuredLogArguments,
             )?),
